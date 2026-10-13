@@ -2,7 +2,10 @@
 import numpy as np
 
 from backend.analysis import receiver
-from backend import geometry
+from backend import config, geometry
+from tests.synth.test_native_l1_multi_closed_loop_fix import (  # noqa: F401
+    l1_multi_run,
+)
 
 
 def test_solve_position_recovers_known_point():
@@ -48,3 +51,39 @@ def test_l5_blind_scan_acquires_nothing_on_pure_noise(tmp_path):
     raw.astype(np.int8).tofile(path)
     res = receiver.fix_from_iq(path, "int8", 25e6, {}, 0.0, band="L5")
     assert res["nav_decode"] == {}
+
+
+def test_gps_only_unchanged(tmp_path):
+    import inspect
+
+    sig = inspect.signature(receiver.fix_from_iq)
+    assert "systems" in sig.parameters
+    assert sig.parameters["systems"].default is None
+
+    rng = np.random.default_rng(42)
+    raw = np.clip(np.round(rng.standard_normal(2 * 50_000) * 20), -127, 127)
+    path = tmp_path / "noise_l1.bin"
+    raw.astype(np.int8).tofile(path)
+
+    res_none = receiver.fix_from_iq(path, "int8", 2.5e6, {}, 0.0, band="L1")
+    res_g = receiver.fix_from_iq(path, "int8", 2.5e6, {}, 0.0, band="L1", systems=["G"])
+    assert res_none == res_g
+    assert res_g == {"error": "only 0 PRNs acquired", "prns_used": []}
+
+
+def test_run_receiver_multi_endpoint(monkeypatch, l1_multi_run):
+    from fastapi.testclient import TestClient
+    from backend.app import app
+
+    outdir, meta, _expected = l1_multi_run
+    monkeypatch.setattr(config, "OUT_DIR", outdir.parent)
+    client = TestClient(app)
+    resp = client.post(
+        "/api/receiver",
+        json={"outdir": outdir.name, "marker": [45.0, 30.0, 100.0]},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "error" not in data, f"receiver returned error: {data}"
+    assert data["error_m"] < 30.0, f"error_m={data.get('error_m')}"
+
