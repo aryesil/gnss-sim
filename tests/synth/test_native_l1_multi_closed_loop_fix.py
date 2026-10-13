@@ -20,6 +20,8 @@ _FS = 20_000_000.0
 _DUR = 1
 _START = dt.datetime(2026, 9, 1, 12, 0, 0)
 
+_CAPTURED = {}
+
 
 @pytest.fixture(scope="module")
 def l1_multi_run(tmp_path_factory):
@@ -30,6 +32,8 @@ def l1_multi_run(tmp_path_factory):
     _orig_cm = geometry.constellation_multi
 
     def wrap(*a, **k):
+        if "eph" not in _CAPTURED and a:
+            _CAPTURED["eph"] = a[0]
         r = _orig_cm(*a, **k)
         collected.extend(r)
         return r
@@ -60,6 +64,11 @@ def l1_multi_run(tmp_path_factory):
         if "code_phase_chips" in e
     }
     meta_dict = json.loads((outdir / "meta.json").read_text())
+    approx_sow = ephemeris.gps_week_and_sow(
+        _START + dt.timedelta(seconds=config.GPS_UTC_LEAP_S)
+    )[1]
+    _CAPTURED["entries"] = collected
+    _CAPTURED["sow"] = approx_sow
     return outdir, meta_dict, expected
 
 
