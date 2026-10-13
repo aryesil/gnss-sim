@@ -4,6 +4,7 @@ import copy
 import pytest
 
 import backend.inspector
+from backend.analysis.l1_acquire import acquire_l1
 from backend.analysis.l1_fix import default_atmo_fn, fix_from_iq_l1_multi
 from tests.synth.test_native_l1_multi_closed_loop_fix import (  # noqa: F401
     l1_multi_run,
@@ -114,3 +115,44 @@ def test_glonass_without_glo_k_is_skipped_and_named(l1_multi_run):
     assert "R1" in result["skipped"]
     assert "glo_k" in result["skipped"]["R1"]
     assert "error" not in result, f"Expected fix to succeed, got: {result}"
+
+
+def test_if_offset_is_used_not_baseband(l1_multi_run):
+    outdir, meta, expected = l1_multi_run
+    band = next(b for b in meta["bands"] if b["id"] == "L1")
+    fs = band["fs"]
+    iq = backend.inspector.read_iq(
+        outdir / band["file"], "int16", max_samples=int(fs * 0.020)
+    )
+    sv = next(
+        s
+        for s in meta["provenance"]["svs"]
+        if s["sys"] in ("C", "E") and abs(s.get("if_hz", 0.0)) > 1e6
+    )
+    res_baseband = acquire_l1(iq, fs, sv["sys"], sv["prn"], centre_offset_hz=0.0)
+    assert res_baseband["metric_db"] < 12.0, (
+        f"Expected baseband acquisition to fail (< 12 dB), got {res_baseband['metric_db']:.2f} dB"
+    )
+    res_if = acquire_l1(iq, fs, sv["sys"], sv["prn"], centre_offset_hz=sv["if_hz"])
+    assert res_if["metric_db"] > 25.0, (
+        f"Expected acquisition at IF {sv['if_hz']} Hz to succeed (> 25 dB), got {res_if['metric_db']:.2f} dB"
+    )
+
+
+def test_galileo_peak_not_on_boc_sidelobe(l1_multi_run):
+    outdir, meta, expected = l1_multi_run
+    band = next(b for b in meta["bands"] if b["id"] == "L1")
+    fs = band["fs"]
+    iq = backend.inspector.read_iq(
+        outdir / band["file"], "int16", max_samples=int(fs * 0.020)
+    )
+    sv = next(s for s in meta["provenance"]["svs"] if s["sys"] == "E")
+    res = acquire_l1(iq, fs, "E", sv["prn"], centre_offset_hz=sv["if_hz"])
+    err = (
+        (res["code_phase_chips"] - expected[("E", sv["prn"])] + sv["code_len"] / 2)
+        % sv["code_len"]
+    ) - sv["code_len"] / 2
+    assert abs(err) <= 0.05, (
+        f"Galileo E{sv['prn']} code phase error {err:.4f} chips exceeds 0.05"
+    )
+

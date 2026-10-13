@@ -590,12 +590,7 @@ A set of software-only checks that do not need hardware or the real
   kept, because the same request without them regenerates it.
 - **The fit arc is 4 h.** Precise generation needs an SP3 product whose
   epochs cover the scenario start ± 2 h; outside that it returns HTTP 422.
-- **L1 band only** — no L2/L5. The `gps-sdr-sim` engine is GPS L1 C/A
-  only. The `native` engine adds GLONASS G1, Galileo E1, BeiDou B1I,
-  QZSS L1 C/A and SBAS L1, but only the GPS L1 C/A component is checked
-  by the built-in software receiver / acquisition inspector — the other
-  systems are verified by the constellation's own unit tests and by
-  reading back `meta.json`, not by a full end-to-end fix.
+- **L1 multi-GNSS receiver fix:** The built-in software receiver solves an end-to-end multi-GNSS L1 code-phase fix across GPS L1 C/A, QZSS L1 C/A, SBAS L1, Galileo E1, BeiDou B1I, and GLONASS G1 from composite IQ when ephemeris is supplied (via `/api/receiver` or `fix_from_iq(..., band='L1')`). Navigation-message decode (I/NAV, D1, SBAS) for a standalone fix without broadcast ephemeris remains a follow-up; LNAV (GPS), CNAV (L2C/L5), and GLONASS strings (L2OF) decode in-receiver.
 - **Two transmit slots** (`TX1`, `TX2`) maximum.
 - **Some endpoints have limited UI wiring** (`/api/receiver`, `/api/lnav`,
   `/api/correlation`, `/api/preview_track`) — call them directly with
