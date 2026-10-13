@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import datetime as dt
+import json
+import pathlib
+
 import numpy as np
 
 from backend import config, geometry, inspector
@@ -549,7 +553,7 @@ def _fix_from_iq_glo_l2of(iq_path, sample_format, sample_rate, eph_by_prn,
 
 def fix_from_iq(iq_path, sample_format, sample_rate, eph_by_prn,
                 approx_time_gps, marker_llh=None, decode_nav=False,
-                *, band: str = "L1") -> dict:
+                *, band: str = "L1", systems=None) -> dict:
     """``band`` selects the signal family. ``"L1"`` is the GPS L1 C/A path
     (all params as before). ``"L2"`` runs the GPS L2C path: CM acquisition
     via :mod:`backend.analysis.band_acquire`, CNAV ephemeris decode via
@@ -567,6 +571,46 @@ def fix_from_iq(iq_path, sample_format, sample_rate, eph_by_prn,
                                      eph_by_prn, approx_time_gps, marker_llh)
     if band != "L1":
         raise ValueError(f"unsupported band {band!r}")
+
+    outdir = pathlib.Path(iq_path).parent
+    meta_file = outdir / "meta.json"
+    meta = {}
+    if meta_file.exists():
+        meta = json.loads(meta_file.read_text())
+        if systems is None:
+            systems = tuple(meta.get("systems") or meta.get("config", {}).get("systems") or {s["sys"] for s in meta.get("provenance", {}).get("svs", [])})
+    if systems and set(systems) - {"G"}:
+        # Multi-GNSS L1 path
+        from backend.analysis.l1_fix import default_atmo_fn, fix_from_iq_l1_multi
+        iq_by_band = {}
+        if meta_file.exists():
+            for b in meta.get("bands", []):
+                bf = outdir / b["file"]
+                if bf.exists():
+                    iq_by_band[b["id"]] = (
+                        inspector.read_iq(bf, sample_format, max_samples=int(b["fs"] * 0.020)),
+                        b["fs"],
+                    )
+        if not iq_by_band:
+            iq = inspector.read_iq(iq_path, sample_format, max_samples=int(sample_rate * 0.020))
+            iq_by_band["L1"] = (iq, sample_rate)
+        approx_llh = marker_llh or (meta.get("config", {}).get("lat", 0.0), meta.get("config", {}).get("lon", 0.0), meta.get("config", {}).get("alt", 0.0))
+        rinex_path = meta.get("config", {}).get("rinex_path")
+        atmo_fn = default_atmo_fn(rinex_path, approx_llh, approx_time_gps) if rinex_path else None
+        if not eph_by_prn and rinex_path:
+            from backend.ephem import ephemeris
+            eph_multi = ephemeris.parse_rinex_multi(rinex_path, tuple(systems))
+            start_dt = dt.datetime.fromisoformat(meta["config"]["start_utc"])
+            gps_start = start_dt + dt.timedelta(seconds=config.GPS_UTC_LEAP_S)
+            week, sow = ephemeris.gps_week_and_sow(gps_start)
+            eph_by_prn = ephemeris.align_epochs(
+                eph_multi, week, sow,
+                kepler_grid_s=ephemeris.toe_grid_for(meta.get("provenance", {}).get("engine")),
+            )
+        return fix_from_iq_l1_multi(
+            iq_by_band, meta, eph_by_prn, approx_time_gps,
+            approx_llh=approx_llh, marker_llh=marker_llh, atmo_fn=atmo_fn,
+        )
     # A LNAV decode needs at least one full set of subframes 1-3 (18 s of
     # 50 bps data) plus acquisition slack; a plain code-phase fix needs
     # only a short slice.

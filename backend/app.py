@@ -298,7 +298,7 @@ def _newest_cached_rinex():
     return max(files, key=lambda p: p.stat().st_mtime)
 
 
-def _resolve_eph(date, rinex_path=None):
+def _resolve_eph(date, rinex_path=None, systems=("G",)):
     """Return (eph_by_prn, source_label).
 
     - explicit real path         -> parse that file
@@ -306,6 +306,8 @@ def _resolve_eph(date, rinex_path=None):
                                     else fall back to the newest cached RINEX
     """
     if rinex_path and rinex_path != "AUTO":
+        if systems and set(systems) - {"G"}:
+            return ephemeris.parse_rinex_multi(rinex_path, tuple(systems)), pathlib.Path(rinex_path).name
         return ephemeris.parse_rinex(rinex_path), pathlib.Path(rinex_path).name
     try:
         return ephemeris.get_ephemeris(date), f"downloaded/cached {date:%Y-%j}"
@@ -1046,12 +1048,8 @@ def run_receiver(body: dict):
     outdir = config.OUT_DIR / body["outdir"]
     meta = json.loads((outdir / "meta.json").read_text())
     start = dt.datetime.fromisoformat(meta["config"]["start_utc"])
-    # generator.run aligns every satellite's toc/toe to the request's start
-    # (KNOWN_ISSUES F4) before generating; the fix solve must use the same
-    # aligned ephemeris the transmitted IQ was actually built from, or the
-    # receiver's expected geometry mismatches the signal (same bug as the
-    # /api/generate inspect step, fixed there first).
-    eph, _ = _resolve_eph(start.date(), meta["config"].get("rinex_path"))
+    systems = tuple(meta.get("systems") or meta.get("config", {}).get("systems") or {s["sys"] for s in meta.get("provenance", {}).get("svs", [])} or ["G"])
+    eph, _ = _resolve_eph(start.date(), meta["config"].get("rinex_path"), systems=systems)
     gps_start = start + dt.timedelta(seconds=config.GPS_UTC_LEAP_S)
     week, sow = ephemeris.gps_week_and_sow(gps_start)
     eph = ephemeris.align_epochs(
@@ -1059,7 +1057,8 @@ def run_receiver(body: dict):
         kepler_grid_s=ephemeris.toe_grid_for(meta.get("provenance", {}).get("engine")))
     return receiver.fix_from_iq(
         outdir / "gpssim.bin", meta["sample_format"], meta["sample_rate"],
-        eph, _gps_tow(start), marker_llh=body.get("marker"))
+        eph, _gps_tow(start), marker_llh=body.get("marker"),
+        systems=systems)
 
 
 @app.get("/api/iqplot")
