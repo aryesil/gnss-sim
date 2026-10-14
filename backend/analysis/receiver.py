@@ -597,16 +597,49 @@ def fix_from_iq(iq_path, sample_format, sample_rate, eph_by_prn,
         approx_llh = marker_llh or (meta.get("config", {}).get("lat", 0.0), meta.get("config", {}).get("lon", 0.0), meta.get("config", {}).get("alt", 0.0))
         rinex_path = meta.get("config", {}).get("rinex_path")
         atmo_fn = default_atmo_fn(rinex_path, approx_llh, approx_time_gps) if rinex_path else None
-        if not eph_by_prn and rinex_path:
-            from backend.ephem import ephemeris
-            eph_multi = ephemeris.parse_rinex_multi(rinex_path, tuple(systems))
-            start_dt = dt.datetime.fromisoformat(meta["config"]["start_utc"])
-            gps_start = start_dt + dt.timedelta(seconds=config.GPS_UTC_LEAP_S)
-            week, sow = ephemeris.gps_week_and_sow(gps_start)
-            eph_by_prn = ephemeris.align_epochs(
-                eph_multi, week, sow,
-                kepler_grid_s=ephemeris.toe_grid_for(meta.get("provenance", {}).get("engine")),
-            )
+        if not eph_by_prn:
+            if decode_nav:
+                from backend.analysis import inav_decode, bds_d1_decode
+                eph_by_prn = {}
+                svs = meta.get("provenance", {}).get("svs", [])
+                for sv in svs:
+                    sysc = sv.get("sys")
+                    prn = sv.get("prn")
+                    band_id = sv.get("band", "L1")
+                    if sysc == "E":
+                        b_info = next((b for b in meta.get("bands", []) if b["id"] == band_id), None)
+                        if b_info:
+                            bf = outdir / b_info["file"]
+                            iq_long = inspector.read_iq(bf, sample_format, max_samples=int(b_info["fs"] * 14.0))
+                            syms = inav_decode.demod_symbols_e1b(iq_long, b_info["fs"], prn, centre_offset_hz=sv.get("if_hz", 0.0))
+                            if len(syms) >= 500:
+                                msgs = inav_decode.decode_messages(syms)
+                                try:
+                                    eph_by_prn[("E", prn)] = inav_decode.reconstruct_ephemeris(msgs)
+                                except Exception:
+                                    pass
+                    elif sysc == "C":
+                        b_info = next((b for b in meta.get("bands", []) if b["id"] == band_id), None)
+                        if b_info:
+                            bf = outdir / b_info["file"]
+                            iq_long = inspector.read_iq(bf, sample_format, max_samples=int(b_info["fs"] * 24.0))
+                            syms = bds_d1_decode.demod_symbols_b1i(iq_long, b_info["fs"], prn, centre_offset_hz=sv.get("if_hz", 0.0))
+                            if len(syms) >= 300:
+                                msgs = bds_d1_decode.decode_messages(syms)
+                                try:
+                                    eph_by_prn[("C", prn)] = bds_d1_decode.reconstruct_ephemeris(msgs, prn=prn)
+                                except Exception:
+                                    pass
+            if not eph_by_prn and rinex_path:
+                from backend.ephem import ephemeris
+                eph_multi = ephemeris.parse_rinex_multi(rinex_path, tuple(systems))
+                start_dt = dt.datetime.fromisoformat(meta["config"]["start_utc"])
+                gps_start = start_dt + dt.timedelta(seconds=config.GPS_UTC_LEAP_S)
+                week, sow = ephemeris.gps_week_and_sow(gps_start)
+                eph_by_prn = ephemeris.align_epochs(
+                    eph_multi, week, sow,
+                    kepler_grid_s=ephemeris.toe_grid_for(meta.get("provenance", {}).get("engine")),
+                )
         return fix_from_iq_l1_multi(
             iq_by_band, meta, eph_by_prn, approx_time_gps,
             approx_llh=approx_llh, marker_llh=marker_llh, atmo_fn=atmo_fn,
