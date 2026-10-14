@@ -182,6 +182,7 @@ def decode_messages(
 
 def reconstruct_ephemeris(
     subframes: list[dict[str, Any]] | dict[int, Any],
+    prn: int | None = None,
 ) -> dict[str, Any]:
     """Combine subframes 1, 2, 3 into a standard ephemeris dict for system 'C'.
 
@@ -264,7 +265,7 @@ def reconstruct_ephemeris(
 
     sow = float(_u(b1, 18, 20))
 
-    return {
+    out = {
         "system": "C",
         "bdt_week": bdt_week,
         "week": bdt_week,
@@ -301,6 +302,9 @@ def reconstruct_ephemeris(
         "iono_beta": iono_beta,
         "iono": (iono_alpha, iono_beta),
     }
+    if prn is not None:
+        out["prn"] = int(prn)
+    return out
 
 
 # --- IQ -> B1I D1 symbols ---------------------------------------------------
