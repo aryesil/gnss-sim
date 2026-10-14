@@ -10,41 +10,63 @@ from backend import config, geometry, inspector
 from backend.models import error_budget, wls
 
 
-def solve_position(pseudoranges, sat_positions, x0=None) -> dict:
+def solve_position(pseudoranges: dict, sat_positions: dict, x0=None) -> dict:
     prns = sorted(pseudoranges)
-    S = np.array([sat_positions[p] for p in prns], float)
-    pr = np.array([pseudoranges[p] for p in prns], float)
-    X = np.zeros(4) if x0 is None else np.array(x0, float)
+    m = len(prns)
+    if m < 4:
+        raise ValueError(f"need >= 4 satellites, got {m}")
+    S = np.array([sat_positions[p] for p in prns], dtype=np.float64)
+    pr = np.array([pseudoranges[p] for p in prns], dtype=np.float64)
+
+    # Pre-allocate design matrix H: shape (m, 4)
+    # Column 0..2: unit line-of-sight direction vectors (dimensionless)
+    # Column 3: 1.0 (receiver clock bias scaled to meters: delta_t_m = c * delta_t_s)
+    H = np.empty((m, 4), dtype=np.float64)
+    H[:, 3] = 1.0
+
+    X = np.zeros(4, dtype=np.float64)
+    if x0 is not None:
+        X[:3] = x0[:3]
+        if len(x0) > 3:
+            X[3] = float(x0[3]) * config.C
+
+    c = config.C
     it = 0
     for it in range(1, 15):
-        rng = np.linalg.norm(S - X[:3], axis=1)
-        pred = rng + config.C * X[3]
+        diff = X[:3] - S
+        rng = np.linalg.norm(diff, axis=1)
+        pred = rng + X[3]
         dz = pr - pred
-        H = np.column_stack([(X[:3] - S) / rng[:, None], config.C * np.ones(len(prns))])
-        dX, *_ = np.linalg.lstsq(H, dz, rcond=None)
+        H[:, :3] = diff / rng[:, None]
+
+        # Normal equations: (H^T @ H) @ dX = H^T @ dz
+        # System matrix N is 4x4 with condition number ~ 10-100 (well-conditioned)
+        N = H.T @ H
+        rhs = H.T @ dz
+        try:
+            dX = np.linalg.solve(N, rhs)
+        except np.linalg.LinAlgError:
+            dX, *_ = np.linalg.lstsq(H, dz, rcond=None)
+
         X += dX
-        if np.linalg.norm(dX[:3]) < 1e-4:
+        # Inlined Euclidean norm threshold: sqrt(dx^2 + dy^2 + dz^2) < 1e-4 m
+        if (dX[0] * dX[0] + dX[1] * dX[1] + dX[2] * dX[2]) < 1e-8:
             break
-    rng = np.linalg.norm(S - X[:3], axis=1)
-    resid = pr - (rng + config.C * X[3])
+
+    diff = X[:3] - S
+    rng = np.linalg.norm(diff, axis=1)
+    resid = pr - (rng + X[3])
     return {
         "ecef": X[:3].tolist(),
-        "clock_bias_s": float(X[3]),
+        "clock_bias_s": float(X[3] / c),
         "iterations": it,
         "residual_rms_m": float(np.sqrt(np.mean(resid ** 2))),
     }
 
 
-def _ecef_to_llh(x, y, z):
-    a, e2 = 6378137.0, 6.69437999014e-3
-    lon = np.arctan2(y, x)
-    p = np.hypot(x, y)
-    lat = np.arctan2(z, p * (1 - e2))
-    for _ in range(6):
-        n = a / np.sqrt(1 - e2 * np.sin(lat) ** 2)
-        h = p / np.cos(lat) - n
-        lat = np.arctan2(z, p * (1 - e2 * n / (n + h)))
-    return np.degrees(lat), np.degrees(lon), float(h)
+def _ecef_to_llh(x: float, y: float, z: float) -> tuple[float, float, float]:
+    """Convert ECEF coordinates to geodetic (lat, lon, height). Delegates to backend.geometry.ecef_to_llh."""
+    return geometry.ecef_to_llh(x, y, z)
 
 
 _CM_LEN = 10230

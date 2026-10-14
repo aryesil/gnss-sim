@@ -11,25 +11,17 @@ import math
 import numpy as np
 
 from backend.analysis import lnav_encode as le
+from backend.analysis._bit_utils import normalize_symbols, unpack_int, unpack_uint
+from backend.analysis._demod_utils import derotate_bpsk_carrier
+
+_u = unpack_uint
+_s = unpack_int
 
 
 def check_parity(word30, D29_prev: int, D30_prev: int) -> bool:
     w = list(word30)
     d_src = [b ^ D30_prev for b in w[:24]]
     return list(w[24:]) == le.parity_bits(d_src, D29_prev, D30_prev)
-
-
-def _u(bits) -> int:
-    v = 0
-    for b in bits:
-        v = (v << 1) | int(b)
-    return v
-
-
-def _s(bits) -> int:
-    v = _u(bits)
-    n = len(bits)
-    return v - (1 << n) if v >= 1 << (n - 1) else v
 
 
 def _src_words(words) -> list[list[int]]:
@@ -50,24 +42,20 @@ def find_frame(bits) -> list[dict]:
     ``offset``, ``inverted``, ``subframe_id``, ``tow_count``, ``words``
     (10 raw 30-bit words).
     """
-    seq = np.asarray(list(bits))
-    if seq.size and set(np.unique(seq)).issubset({-1, 1}):
-        b = [(0 if x > 0 else 1) for x in seq]
-    else:
-        b = [int(x) & 1 for x in seq]
+    b = normalize_symbols(bits, bpsk_sign=True)
     pre = le.PREAMBLE
     inv = [1 - x for x in pre]
     hits: list[dict] = []
     i = 0
     n = len(b)
     while i + 300 <= n:
-        seg = b[i:i + 8]
+        seg = b[i : i + 8]
         inverted = seg == inv
         if seg != pre and not inverted:
             i += 1
             continue
-        raw = [1 - x for x in b[i:i + 300]] if inverted else b[i:i + 300]
-        words = [raw[k * 30:(k + 1) * 30] for k in range(10)]
+        raw = [1 - x for x in b[i : i + 300]] if inverted else b[i : i + 300]
+        words = [raw[k * 30 : (k + 1) * 30] for k in range(10)]
         d29 = d30 = 0
         ok = True
         for w in words:
@@ -80,8 +68,10 @@ def find_frame(bits) -> list[dict]:
             continue
         how = _src_words(words)[1]
         hits.append({
-            "offset": i, "inverted": inverted,
-            "subframe_id": _u(how[19:22]), "tow_count": _u(how[0:17]),
+            "offset": i,
+            "inverted": inverted,
+            "subframe_id": _u(how[19:22]),
+            "tow_count": _u(how[0:17]),
             "words": words,
         })
         i += 300
@@ -139,19 +129,41 @@ def decode_ephemeris(subframes: dict) -> dict:
 _L1_HZ = 1575.42e6
 
 
-def _prompt_per_ms(x_wiped, fs, ca, code_phase0_chips, code_rate):
+def _prompt_per_ms(x_wiped, fs, ca, code_phase0_chips, code_rate, *, chunk_ms: int = 100):
     """Complex prompt correlator output, one sample per 1 ms C/A period,
-    for a carrier-wiped signal and a given code chipping rate."""
-    k = np.arange(x_wiped.size, dtype=np.float64)
-    # acquire() reports the peak as a right shift of the local replica, so
-    # the aligned replica is the nominal code advanced by -code_phase0.
-    idx = np.floor(k * code_rate / fs - code_phase0_chips).astype(np.int64) % 1023
-    corr = x_wiped * ca[idx]
+    for a carrier-wiped signal and a given code chipping rate.
+
+    Accumulates in chunked blocks of sub-second intervals (default 100 ms)
+    to bound peak temporary memory to < 50 MB even on long captures at high
+    sampling rates.
+    """
     spms = fs / 1000.0
     m = int(x_wiped.size // spms)
+    if m == 0:
+        return np.zeros(0, dtype=np.complex128)
+
     edges = np.floor(np.arange(m + 1) * spms).astype(np.int64)
-    csum = np.concatenate(([0.0 + 0j], np.cumsum(corr)))
-    return csum[edges[1:]] - csum[edges[:-1]]
+    out = np.empty(m, dtype=np.complex128)
+    rate_div_fs = code_rate / fs
+
+    # Cap chunk size so temporary sample buffers never exceed ~250k samples (< 20 MB)
+    max_chunk_samples = 250_000
+    chunk_ms = max(10, min(chunk_ms, int(max_chunk_samples // max(1.0, spms))))
+
+    for i0 in range(0, m, chunk_ms):
+        i1 = min(i0 + chunk_ms, m)
+        s0 = edges[i0]
+        s1 = edges[i1]
+        ns = s1 - s0
+        k_sub = np.arange(ns, dtype=np.float64)
+        cph0 = s0 * rate_div_fs - code_phase0_chips
+        idx_sub = np.floor(k_sub * rate_div_fs + cph0).astype(np.int32) % 1023
+        corr_sub = x_wiped[s0:s1] * ca[idx_sub]
+        sub_edges = edges[i0 : i1 + 1] - s0
+        csum_sub = np.concatenate(([0.0 + 0j], np.cumsum(corr_sub)))
+        out[i0:i1] = csum_sub[sub_edges[1:]] - csum_sub[sub_edges[:-1]]
+
+    return out
 
 
 def demod_nav_bits(iq, fs, prn, code_phase0_chips, doppler_hz, *,
@@ -171,9 +183,21 @@ def demod_nav_bits(iq, fs, prn, code_phase0_chips, doppler_hz, *,
 
     chip_hz = float(inspector.config.CA_CHIP_HZ)
     ca = inspector.ca_code(prn).astype(np.float64)
-    x = np.asarray(iq).astype(np.complex128)
-    k = np.arange(x.size, dtype=np.float64)
-    x = x * np.exp(-2j * np.pi * doppler_hz * k / fs)
+    iq = np.asarray(iq)
+    if not np.iscomplexobj(iq):
+        iq = iq.astype(np.complex64)
+    elif iq.dtype == np.complex128:
+        iq = iq.astype(np.complex64)
+
+    # Carrier wipe in ~1M-sample chunks to keep intermediate memory < 20 MB
+    x = np.empty_like(iq)
+    chunk = 1 << 20
+    carrier_step = -2j * np.pi * doppler_hz / fs
+    for start in range(0, iq.size, chunk):
+        end = min(start + chunk, iq.size)
+        k_chunk = np.arange(start, end, dtype=np.float64)
+        cwipe = np.exp(carrier_step * k_chunk).astype(iq.dtype)
+        x[start:end] = iq[start:end] * cwipe
 
     # The engine holds Doppler constant, but the acquired carrier estimate
     # carries a small error; the matching code-rate error walks the replica
@@ -215,12 +239,6 @@ def demod_nav_bits(iq, fs, prn, code_phase0_chips, doppler_hz, *,
     # residual carrier frequency: coarse 1 ms-rate search, then a fine
     # parabolic refine (the phase must stay coherent across the whole
     # capture, so sub-0.05 Hz accuracy matters over 20 s).
-    #
-    # With continuous_doppler the residual carrier is a frequency *ramp*
-    # (Doppler rate), i.e. a quadratic phase over the capture -- a linear
-    # phase search cannot see the peak. Estimate the constant part from the
-    # first second only (small quadratic swing there), de-rotate, then let
-    # the degree-2 fit on bits**2 below absorb the ramp.
     m = np.arange(p.size, dtype=np.float64)
     m_coarse = m[:min(p.size, 1000)]
     p_coarse = p[:m_coarse.size]
@@ -241,16 +259,5 @@ def demod_nav_bits(iq, fs, prn, code_phase0_chips, doppler_hz, *,
     p = p * np.exp(-2j * np.pi * best_f * m / 1000.0)
 
     bits = p.reshape(nb, 20).sum(axis=1)
-
-    # second-stage residual from the phase curve of the data-wiped bit
-    # samples (bits**2 removes the +/-1 modulation): a degree-2 fit absorbs
-    # both a residual carrier frequency and a residual Doppler *rate*
-    # (quadratic phase) left by continuous_doppler; then a constant phase.
-    bi = np.arange(nb, dtype=np.float64)
-    ph = np.unwrap(np.angle(bits ** 2))
-    deg = 2 if nb >= 5 else 1
-    coef = np.polyfit(bi, ph, deg) / 2.0
-    bits = bits * np.exp(-1j * np.polyval(coef, bi))
-    phi = 0.5 * np.angle(np.sum(bits ** 2))
-    bits = bits * np.exp(-1j * phi)
+    bits = derotate_bpsk_carrier(bits, deg=2)
     return (np.real(bits) < 0).astype(np.int8)

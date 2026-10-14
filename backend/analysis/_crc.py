@@ -1,24 +1,107 @@
-"""CRC-24Q (polynomial 0x1864CFB), the parity used by GPS CNAV, Galileo,
-SBAS and RTCM. MSB-first over the message bits, with 24 trailing zero
-shifts (the "augmented message" form). Shared by the navigation-message
-encoders / decoders so the algorithm is defined once.
+"""CRC-24Q (polynomial 0x1864CFB) calculation and verification.
+
+Parity checksum used by GPS CNAV, Galileo I/NAV and F/NAV, SBAS L1, and RTCM.
+Augmented message format: MSB-first over data bits with 24 trailing zeros.
+Accelerated with precomputed 256-entry byte lookup table.
 """
 from __future__ import annotations
+
+from typing import Sequence
+import numpy as np
 
 _CRC24Q = 0x1864CFB
 
 
-def crc24q(bits) -> list[int]:
+def _build_crc24q_table() -> list[int]:
+    table: list[int] = []
+    for byte in range(256):
+        reg = byte << 16
+        for _ in range(8):
+            if reg & 0x800000:
+                reg = ((reg << 1) ^ _CRC24Q) & 0xFFFFFF
+            else:
+                reg = (reg << 1) & 0xFFFFFF
+        table.append(reg)
+    return table
+
+
+_CRC24Q_TABLE = _build_crc24q_table()
+
+
+def crc24q(bits: Sequence[int] | np.ndarray) -> list[int]:
+    """Compute 24-bit CRC-24Q checksum for a bit sequence using fast byte-table lookup.
+
+    Parameters
+    ----------
+    bits : Sequence[int] | np.ndarray
+        Payload bits (0s and 1s).
+
+    Returns
+    -------
+    list[int]
+        24-bit CRC-24Q checksum as a list of binary integers.
+    """
     reg = 0
-    for b in bits:
+    n = len(bits)
+    idx = 0
+
+    # Fast 8-bit table processing for full bytes
+    while idx + 8 <= n:
+        chunk = bits[idx : idx + 8]
+        byte = (
+            (int(chunk[0]) << 7)
+            | (int(chunk[1]) << 6)
+            | (int(chunk[2]) << 5)
+            | (int(chunk[3]) << 4)
+            | (int(chunk[4]) << 3)
+            | (int(chunk[5]) << 2)
+            | (int(chunk[6]) << 1)
+            | int(chunk[7])
+        )
+        top = (reg >> 16) ^ byte
+        reg = ((reg << 8) & 0xFFFFFF) ^ _CRC24Q_TABLE[top]
+        idx += 8
+
+    # Process remaining 0-7 residual bits
+    for b in bits[idx:]:
         reg ^= (int(b) & 1) << 23
         reg <<= 1
         if reg & (1 << 24):
             reg ^= _CRC24Q
         reg &= 0xFFFFFF
-    for _ in range(24):
-        reg <<= 1
-        if reg & (1 << 24):
-            reg ^= _CRC24Q
-        reg &= 0xFFFFFF
+
+    # Apply 24 trailing zero shifts (equivalent to 3 zero bytes in table)
+    reg = ((reg << 8) & 0xFFFFFF) ^ _CRC24Q_TABLE[(reg >> 16) & 0xFF]
+    reg = ((reg << 8) & 0xFFFFFF) ^ _CRC24Q_TABLE[(reg >> 16) & 0xFF]
+    reg = ((reg << 8) & 0xFFFFFF) ^ _CRC24Q_TABLE[(reg >> 16) & 0xFF]
+
     return [(reg >> (23 - i)) & 1 for i in range(24)]
+
+
+def check_crc24q(
+    bits: Sequence[int] | np.ndarray,
+    data_bits: int,
+    crc_bits: int = 24,
+) -> bool:
+    """Verify trailing CRC-24Q checksum against message payload.
+
+    Parameters
+    ----------
+    bits : Sequence[int] | np.ndarray
+        Full sequence containing data_bits followed by crc_bits checksum.
+    data_bits : int
+        Number of payload bits preceding the CRC.
+    crc_bits : int, default 24
+        Number of trailing CRC bits (standard is 24).
+
+    Returns
+    -------
+    bool
+        True if computed CRC matches the trailing checksum exactly; False otherwise.
+    """
+    total = data_bits + crc_bits
+    if len(bits) < total:
+        return False
+    payload = bits[:data_bits]
+    expected = [int(b) & 1 for b in bits[data_bits:total]]
+    return crc24q(payload) == expected

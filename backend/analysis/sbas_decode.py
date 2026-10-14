@@ -11,16 +11,29 @@ Implements RTCA DO-229 / ICAO Annex 10 SBAS L1:
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
+
+from backend.analysis import _viterbi
+from backend.analysis._bit_utils import (
+    normalize_symbols,
+    parity_bit,
+    unpack_field,
+    unpack_int,
+    unpack_uint,
+)
+from backend.analysis._crc import check_crc24q, crc24q
+from backend.analysis._demod_utils import derotate_bpsk_carrier
 
 SYM_RATE_HZ = 500.0
 DATA_RATE_BPS = 250.0
 _PREAMBLES = (0x53, 0x9A, 0xC6)
 _CRC24Q = 0x1864CFB
-_G1 = 0o171
-_G2 = 0o133
+_G1 = _viterbi._G1
+_G2 = _viterbi._G2
+_NXT = _viterbi._NXT_STD
+_OUT = _viterbi._OUT_STD
 
 _POS = 0.08          # metres (DO-229 GEO position LSB)
 _VEL = 0.000625      # m/s
@@ -31,121 +44,27 @@ _SBAS_LEN = 1023
 _SBAS_SYM_S = 0.002  # 2 ms = 500 sym/s
 _SBAS_CTR_HZ = 1_575_420_000.0
 
-
-def _parity(x: int) -> int:
-    return bin(x).count("1") & 1
-
-
-def _u(bits: list[int] | np.ndarray, lo: int = 0, n: int | None = None) -> int:
-    if n is None:
-        n = len(bits) - lo
-    v = 0
-    for b in bits[lo : lo + n]:
-        v = (v << 1) | (int(b) & 1)
-    return v
-
-
-def _s(bits: list[int] | np.ndarray, lo: int = 0, n: int | None = None) -> int:
-    if n is None:
-        n = len(bits) - lo
-    v = _u(bits, lo, n)
-    if v >= (1 << (n - 1)):
-        v -= (1 << n)
-    return v
-
-
-def crc24q(bits: list[int] | np.ndarray) -> list[int]:
-    reg = 0
-    for b in bits:
-        reg ^= (int(b) & 1) << 23
-        reg <<= 1
-        if reg & (1 << 24):
-            reg ^= _CRC24Q
-        reg &= 0xFFFFFF
-    for _ in range(24):
-        reg <<= 1
-        if reg & (1 << 24):
-            reg ^= _CRC24Q
-        reg &= 0xFFFFFF
-    return [int(reg >> (23 - i)) & 1 for i in range(24)]
+_parity = parity_bit
+_u = unpack_uint
+_s = unpack_int
+_field = unpack_field
 
 
 def check_crc(bits250: list[int] | np.ndarray) -> bool:
     """Verify 24-bit CRC-24Q over 226 bits of header and data."""
     if len(bits250) != 250:
         return False
-    head = list(bits250[:226])
-    expected = list(bits250[226:250])
-    return crc24q(head) == expected
+    return check_crc24q(bits250, data_bits=226, crc_bits=24)
 
 
-def _viterbi_tables():
-    """Trellis transition tables for rate-1/2 K=7 code (G1=0o171, G2=0o133, G2 not inverted)."""
-    nxt = np.zeros((64, 2), dtype=np.int64)
-    out = np.zeros((64, 2, 2), dtype=np.int64)
-    for st in range(64):
-        for b in (0, 1):
-            r = ((st << 1) | b) & 0x7F
-            nxt[st, b] = r & 0x3F
-            out[st, b, 0] = _parity(r & _G1)
-            out[st, b, 1] = _parity(r & _G2)
-    return nxt, out
-
-
-_NXT, _OUT = _viterbi_tables()
-
-
-def viterbi_free_decode(coded: list[int] | np.ndarray) -> list[int]:
+def viterbi_free_decode(coded: Sequence[int] | np.ndarray) -> list[int]:
     """Exact inverse of continuous convolutional encoder on clean symbols starting from reg 0."""
-    reg = 0
-    out: list[int] = []
-    sym = [int(s) & 1 for s in coded]
-    for i in range(0, len(sym) - 1, 2):
-        s0, s1 = sym[i], sym[i + 1]
-        for guess in (0, 1):
-            r = ((reg << 1) | guess) & 0x7F
-            if _parity(r & _G1) == s0 and _parity(r & _G2) == s1:
-                out.append(guess)
-                reg = r
-                break
-        else:
-            out.append(0)
-            reg = (reg << 1) & 0x7F
-    return out
+    return _viterbi.viterbi_free_decode(coded, invert_g2=False)
 
 
-def viterbi_decode(coded: list[int] | np.ndarray) -> list[int]:
+def viterbi_decode(coded: Sequence[int] | np.ndarray) -> list[int]:
     """Hard-decision Viterbi decoder with unconstrained initial state."""
-    s = np.asarray([int(x) & 1 for x in coded], dtype=np.int64)
-    n = s.size // 2
-    if n == 0:
-        return []
-    pairs = s[: 2 * n].reshape(n, 2)
-    metric = np.zeros(64)
-    prev = np.zeros((n, 64), dtype=np.int64)
-    bit = np.zeros((n, 64), dtype=np.int8)
-    src = np.repeat(np.arange(64), 2)
-    bsrc = np.tile([0, 1], 64)
-    dst = _NXT[src, bsrc]
-
-    for k in range(n):
-        cost = metric[src] + (_OUT[src, bsrc, 0] != pairs[k, 0]) + (_OUT[src, bsrc, 1] != pairs[k, 1])
-        order = np.lexsort((cost, dst))
-        first = np.ones(order.size, dtype=bool)
-        first[1:] = dst[order][1:] != dst[order][:-1]
-        win = order[first]
-        new = np.full(64, np.inf)
-        new[dst[win]] = cost[win]
-        prev[k, dst[win]] = src[win]
-        bit[k, dst[win]] = bsrc[win]
-        metric = new
-
-    st = int(np.argmin(metric))
-    bits = np.zeros(n, dtype=np.int8)
-    for k in range(n - 1, -1, -1):
-        bits[k] = bit[k, st]
-        st = int(prev[k, st])
-    return bits.tolist()
+    return _viterbi.viterbi_decode(coded, invert_g2=False, known_start_state=None)
 
 
 def decode_block(bits: list[int]) -> dict[str, Any] | None:
@@ -209,11 +128,7 @@ def decode_messages(symbols: list[int] | np.ndarray) -> list[dict[str, Any]]:
     """Decode SBAS symbols ({-1, +1} or {0, 1}) into parsed message blocks.
     Handles phase inversion (180 degree ambiguity) and preamble synchronization.
     """
-    sym = np.asarray(symbols)
-    if set(np.unique(sym)).issubset({-1, 1}):
-        b = [(1 if x > 0 else 0) for x in sym]
-    else:
-        b = [int(x) & 1 for x in sym]
+    b = normalize_symbols(symbols, bpsk_sign=False)
 
     def _find_blocks(data_bits: list[int]) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
@@ -337,17 +252,26 @@ def demod_symbols_sbas_l1(
     if avail_ms < 2:
         return np.zeros(0, dtype=np.int8)
 
-    t = (np.arange(avail_ms * npp, dtype=np.float64) + e0) / fs
     carrier_freq = centre_offset_hz + float(dopp_hz)
-    wipe = np.exp(-2j * np.pi * carrier_freq * t)
+    rate_div_ctr = (_SBAS_CHIP_HZ / _SBAS_CTR_HZ) * float(dopp_hz)
+    inv_fs = 1.0 / fs
 
-    cph = (
-        cp0 + _SBAS_CHIP_HZ * t + (_SBAS_CHIP_HZ / _SBAS_CTR_HZ) * float(dopp_hz) * t
-    ) % _SBAS_LEN
-    chip_idx = np.floor(cph).astype(np.int64)
-    rep = code[chip_idx]
+    ms_corr = np.empty(avail_ms, dtype=np.complex64)
+    # Bound chunk size so peak temporary buffer never exceeds ~250k samples (< 20 MB)
+    max_chunk_samples = 250_000
+    chunk_ms = max(2, min(100, int(max_chunk_samples // max(1, npp))))
 
-    ms_corr = (base[: avail_ms * npp] * wipe * rep).reshape(avail_ms, npp).sum(axis=1)
+    for m0 in range(0, avail_ms, chunk_ms):
+        m1 = min(m0 + chunk_ms, avail_ms)
+        n_chk = m1 - m0
+        k0 = m0 * npp
+        k1 = m1 * npp
+        t_chk = (np.arange(k0, k1, dtype=np.float64) + e0) * inv_fs
+        wipe_chk = np.exp(-2j * np.pi * carrier_freq * t_chk).astype(np.complex64)
+        cph_chk = (cp0 + _SBAS_CHIP_HZ * t_chk + rate_div_ctr * t_chk) % _SBAS_LEN
+        chip_idx_chk = np.floor(cph_chk).astype(np.int32)
+        rep_chk = code[chip_idx_chk].astype(np.float32)
+        ms_corr[m0:m1] = (base[k0:k1] * wipe_chk * rep_chk).reshape(n_chk, npp).sum(axis=1)
 
     best_off, best_en = 0, -1.0
     for off in (0, 1):
@@ -364,14 +288,7 @@ def demod_symbols_sbas_l1(
         return np.zeros(0, dtype=np.int8)
 
     seg = ms_corr[best_off : best_off + nsym * 2].reshape(nsym, 2).sum(axis=1)
-
-    ph = np.unwrap(np.angle(seg ** 2))
-    deg = 2 if nsym >= 8 else 1
-    bi = np.arange(nsym, dtype=np.float64)
-    coef = np.polyfit(bi, ph, deg) / 2.0
-    seg = seg * np.exp(-1j * np.polyval(coef, bi))
-    phi0 = 0.5 * np.angle(np.sum(seg ** 2))
-    seg = seg * np.exp(-1j * phi0)
+    seg = derotate_bpsk_carrier(seg, deg=2)
 
     return np.where(np.real(seg) > 0, np.int8(1), np.int8(0)).astype(np.int8)
 

@@ -15,59 +15,41 @@ centre only).
 from __future__ import annotations
 
 import math
+from typing import Sequence
 
 import numpy as np
 
 from backend.analysis import _fnav_layout as L
-from backend.analysis._crc import crc24q
+from backend.analysis import _viterbi
+from backend.analysis._bit_utils import (
+    deinterleave_block,
+    normalize_symbols,
+    parity_bit,
+    unpack_field,
+    unpack_int,
+    unpack_uint,
+)
+from backend.analysis._crc import check_crc24q, crc24q
 
 _PREAMBLE = [1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0]
-_G1 = 0o171
-_G2 = 0o133
+_G1 = _viterbi._G1
+_G2 = _viterbi._G2
 _PI = math.pi
 
-
-def _parity(x: int) -> int:
-    return bin(x).count("1") & 1
-
-
-def deinterleave_8x61(sym) -> list[int]:
-    a = np.asarray(list(sym)).reshape(61, 8)
-    return a.T.reshape(L.CODED_SYMS).tolist()
+_parity = parity_bit
+_u = unpack_uint
+_s = unpack_int
+_field = unpack_field
 
 
-def viterbi_free_decode(coded) -> list[int]:
-    """Exact inverse of fnav_encode.conv_encode on a clean channel (from
-    reg 0)."""
-    reg = 0
-    out: list[int] = []
-    coded = list(int(s) & 1 for s in coded)
-    for i in range(0, len(coded) - 1, 2):
-        c1, c2 = coded[i], coded[i + 1]
-        for cand in (0, 1):
-            r = ((reg << 1) | cand) & 0x7F
-            if _parity(r & _G1) == c1 and (_parity(r & _G2) ^ 1) == c2:
-                out.append(cand)
-                reg = r
-                break
-        else:
-            out.append(0)
-            reg = (reg << 1) & 0x7F
-    return out
+def deinterleave_8x61(sym: Sequence[int] | np.ndarray) -> list[int]:
+    """Block deinterleaver: 8 rows x 61 cols transpose."""
+    return deinterleave_block(sym, rows=61, cols=8)
 
 
-def _u(bits, lo, n):
-    v = 0
-    for b in bits[lo:lo + n]:
-        v = (v << 1) | (int(b) & 1)
-    return v
-
-
-def _field(bits, lo, kind, scale, n):
-    v = _u(bits, lo, n)
-    if kind == "s" and (v & (1 << (n - 1))):
-        v -= 1 << n
-    return v * scale
+def viterbi_free_decode(coded: Sequence[int] | np.ndarray) -> list[int]:
+    """Exact inverse of fnav_encode.conv_encode on a clean channel (from reg 0)."""
+    return _viterbi.viterbi_free_decode(coded, invert_g2=True)
 
 
 def _decode_word(wtype: int, message: list[int]) -> dict:
@@ -80,25 +62,25 @@ def _decode_word(wtype: int, message: list[int]) -> dict:
     return out
 
 
-def decode_messages(sym01) -> list[dict]:
+def decode_messages(sym01: Sequence[int] | np.ndarray) -> list[dict]:
     """Scan a demodulated {0,1} symbol stream for F/NAV pages: since the
     12-symbol preamble is uncoded (not FEC-protected), pages are found by
     a literal pattern match rather than the CNAV-style continuous re-sync
     on a decoded bit stream. Both overall polarities are tried (the
     physical layer's carrier-phase ambiguity)."""
-    sym01 = list(int(x) & 1 for x in sym01)
-    n = len(sym01)
+    sym = normalize_symbols(sym01, bpsk_sign=False)
+    n = len(sym)
     for flip in (0, 1):
-        stream = [x ^ flip for x in sym01]
+        stream = [x ^ flip for x in sym]
         msgs: list[dict] = []
         i = 0
         while i + L.PAGE_SYMS <= n:
-            if stream[i:i + L.PREAMBLE_SYMS] == _PREAMBLE:
-                coded = deinterleave_8x61(stream[i + L.PREAMBLE_SYMS:i + L.PAGE_SYMS])
+            if stream[i : i + L.PREAMBLE_SYMS] == _PREAMBLE:
+                coded = deinterleave_8x61(stream[i + L.PREAMBLE_SYMS : i + L.PAGE_SYMS])
                 pre_fec = viterbi_free_decode(coded)
-                message = pre_fec[:L.MSG_BITS]
-                crc = pre_fec[L.MSG_BITS:L.MSG_BITS + L.CRC_BITS]
-                if crc24q(message) == crc:
+                message = pre_fec[: L.MSG_BITS]
+                crc = pre_fec[L.MSG_BITS : L.MSG_BITS + L.CRC_BITS]
+                if check_crc24q(pre_fec, data_bits=L.MSG_BITS, crc_bits=L.CRC_BITS):
                     wtype = _u(message, 0, 6)
                     msgs.append({
                         "type": wtype,
