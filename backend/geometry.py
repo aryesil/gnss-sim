@@ -120,7 +120,7 @@ def sat_state(eph: dict, t_gps: float):
     pos = _p(tk)
     dt = 0.5
     vel = (_p(tk + dt) - _p(tk - dt)) / (2 * dt)
-    tsv = t_gps - eph["toc"]
+    tsv = ((t_gps - eph["toc"] + 302400.0) % 604800.0) - 302400.0
     clk = (eph["af0"] + eph["af1"] * tsv + eph["af2"] * tsv ** 2
            + frel * eph["e"] * eph["sqrtA"] * np.sin(E))
     return pos, vel, float(clk)
@@ -167,10 +167,36 @@ def solve_transmit_time(eph, rx_ecef, t_rx: float):
     return pos_rot, vel, float(tof), float(clk)
 
 
+def ecef_to_llh(x: float, y: float, z: float) -> tuple[float, float, float]:
+    """Convert ECEF coordinates (x, y, z) in meters to geodetic (lat_deg, lon_deg, h_m)
+    on the WGS-84 ellipsoid using Bowring's / standard iterative inverse.
+    """
+    lon = np.arctan2(y, x)
+    p = np.hypot(x, y)
+    if p < 1e-6:
+        lat = np.pi / 2.0 if z > 0 else -np.pi / 2.0
+        h = abs(z) - _A_WGS84 * np.sqrt(1.0 - _E2_WGS84)
+        return float(np.degrees(lat)), float(np.degrees(lon)), float(h)
+    lat = np.arctan2(z, p * (1.0 - _E2_WGS84))
+    for _ in range(6):
+        n = _A_WGS84 / np.sqrt(1.0 - _E2_WGS84 * np.sin(lat) ** 2)
+        h = p / np.cos(lat) - n
+        lat = np.arctan2(z, p * (1.0 - _E2_WGS84 * n / (n + h)))
+    return float(np.degrees(lat)), float(np.degrees(lon)), float(h)
+
+
 def _enu(rx_ecef):
     x, y, z = rx_ecef
     lon = np.arctan2(y, x)
-    lat = np.arctan2(z, np.sqrt(x * x + y * y))
+    p = np.hypot(x, y)
+    if p < 1e-6:
+        lat = np.pi / 2.0 if z > 0 else -np.pi / 2.0
+    else:
+        lat = np.arctan2(z, p * (1.0 - _E2_WGS84))
+        for _ in range(6):
+            n = _A_WGS84 / np.sqrt(1.0 - _E2_WGS84 * np.sin(lat) ** 2)
+            h = p / np.cos(lat) - n
+            lat = np.arctan2(z, p * (1.0 - _E2_WGS84 * n / (n + h)))
     e = np.array([-np.sin(lon), np.cos(lon), 0.0])
     n = np.array([-np.sin(lat) * np.cos(lon), -np.sin(lat) * np.sin(lon), np.cos(lat)])
     u = np.array([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)])

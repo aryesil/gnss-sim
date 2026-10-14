@@ -129,3 +129,67 @@ def test_dop_small_case():
     d = geometry.dop(entries, rx_ecef=(0, 0, 0))
     assert 1.0 < d["pdop"] < 10.0
     assert d["gdop"] >= d["pdop"]
+
+
+def test_enu_uses_geodetic_wgs84_latitude():
+    """Verify I11: _enu computes up-vector from WGS-84 geodetic latitude, not geocentric."""
+    lat_deg, lon_deg, h_m = 45.0, 30.0, 100.0
+    rx_ecef = geometry.llh_to_ecef(lat_deg, lon_deg, h_m)
+    e, n, u = geometry._enu(rx_ecef)
+
+    # Expected geodetic normal vector on WGS-84 ellipsoid at (lat=45 deg, lon=30 deg)
+    phi = math.radians(lat_deg)
+    lam = math.radians(lon_deg)
+    u_expected = np.array([math.cos(phi) * math.cos(lam),
+                           math.cos(phi) * math.sin(lam),
+                           math.sin(phi)])
+
+    # Geocentric latitude would have angle arctan(z / sqrt(x^2 + y^2)) ~= 44.807 deg
+    theta_geocentric = math.atan2(rx_ecef[2], math.hypot(rx_ecef[0], rx_ecef[1]))
+    u_geocentric = np.array([math.cos(theta_geocentric) * math.cos(lam),
+                             math.cos(theta_geocentric) * math.sin(lam),
+                             math.sin(theta_geocentric)])
+
+    # Angular error between u and expected geodetic normal should be nearly zero (< 1e-6 rad)
+    angle_to_geodetic = math.acos(np.clip(np.dot(u, u_expected), -1.0, 1.0))
+    angle_to_geocentric = math.acos(np.clip(np.dot(u, u_geocentric), -1.0, 1.0))
+    assert math.degrees(angle_to_geodetic) < 1e-4
+    assert math.degrees(angle_to_geocentric) > 0.18  # Proves difference from old geocentric bug
+
+    # Verify ecef_to_llh roundtrip
+    lat_out, lon_out, h_out = geometry.ecef_to_llh(*rx_ecef)
+    assert abs(lat_out - lat_deg) < 1e-7
+    assert abs(lon_out - lon_deg) < 1e-7
+    assert abs(h_out - h_m) < 1e-3
+
+
+def test_sat_state_clock_week_rollover_wrap():
+    """Verify I15: sat_state wraps tsv across GPS week boundaries (t_gps near 0, toc near 604800)."""
+    eph = {
+        "system": "G",
+        "prn": 1,
+        "toe": 604750.0,
+        "toc": 604750.0,
+        "sqrtA": 5153.7,
+        "e": 0.001,
+        "m0": 0.0,
+        "omega0": 0.0,
+        "i0": math.radians(55.0),
+        "omega": 0.0,
+        "idot": 0.0,
+        "omega_dot": 0.0,
+        "delta_n": 0.0,
+        "cuc": 0.0, "cus": 0.0, "crc": 0.0, "crs": 0.0, "cic": 0.0, "cis": 0.0,
+        "af0": 1.0e-5,
+        "af1": 1.0e-11,
+        "af2": 0.0,
+    }
+    # t_gps is at 50 s into the new week; toc was 604750 s in the previous week (dt = +100 s)
+    t_gps = 50.0
+    _pos, _vel, clk = geometry.sat_state(eph, t_gps)
+
+    # With rollover wrap: tsv = +100 s -> clk ~= af0 + af1 * 100 s
+    # Without rollover wrap: tsv would be -604700 s -> clk error would be ~6e-6 s (1.8 km)
+    expected_clk = eph["af0"] + eph["af1"] * 100.0
+    assert abs(clk - expected_clk) < 1e-8
+

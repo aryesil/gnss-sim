@@ -1,12 +1,12 @@
 # Code Review — GPS L1 C/A Signal Simulator
 
-> **Post-review status (commit c081eba):** the two Critical findings (C1 leap-second
+> **Post-review status (commit c081eba & v1.2.0):** the two Critical findings (C1 leap-second
 > at the `gps-sdr-sim -t` boundary, C2 coarse Doppler grid) and Important findings
-> I10 (ionosphere left on) and I9 (`app.js` DOP crash) are **FIXED**. All other
-> Important findings (I1–I8, I11–I17) below are **open / not yet addressed** — this
-> file is the tracking list for them.
+> I10 (ionosphere left on), I9 (`app.js` DOP crash), **I11 (WGS-84 geodetic ENU)**, and
+> **I15 (clock polynomial week-rollover wrap on `tsv`)** are **FIXED**. All other
+> Important findings (I1–I8, I12–I14, I16–I17) below are tracked here.
 >
-> - Multi-GNSS L1 receiver code-phase fix (GPS, QZSS, SBAS, Galileo E1, BeiDou B1I, GLONASS G1) is supported as of v1.0.1; full blind nav-decode on L1 without supplied ephemeris is open for E1 I/NAV and BDS D1.
+> - Multi-GNSS L1 receiver code-phase fix and standalone blind navigation decode (GPS LNAV, Galileo E1 I/NAV, BeiDou B1I D1, SBAS L1 Type 9) without supplied ephemeris is fully supported as of v1.2.0.
 
 **Range:** `1065973a` → `2b9de488` (17 commits)
 **Reviewer:** Senior Code Reviewer (architecture / DSP / GNSS / Python / FastAPI)
@@ -334,8 +334,13 @@ un-modelled term. Pass `-i` by default and surface it as an explicit opt-in with
 warning §6.4 describes.
 
 **I11. `geometry._enu` uses geocentric, not geodetic, latitude — az/el are off by up
-to 0.19°.**
+to 0.19°.** [FIXED in v1.2.0]
 `backend/geometry.py:95-102`
+
+> **Status:** **FIXED** in v1.2.0. `geometry._enu` now computes the local geodetic
+> normal vector and rotation matrix from WGS-84 ellipsoid geodetic latitude using the
+> standard iterative inverse, eliminating the 0.19° az/el offset. `ecef_to_llh` is also
+> exported from `backend.geometry`. Verified with `test_enu_uses_geodetic_wgs84_latitude`.
 
 ```python
 lat = np.arctan2(z, np.sqrt(x*x + y*y))     # geocentric
@@ -406,8 +411,13 @@ with `marker_llh=None`, `approx_rx = np.zeros(3)` puts the linearization point a
 Earth's centre and `_ecef_to_llh(0,0,0)` divides by zero — either require a marker or
 seed from a rough solution.
 
-**I15. `sat_state`'s clock polynomial has no week-rollover wrap on `tsv`.**
+**I15. `sat_state`'s clock polynomial has no week-rollover wrap on `tsv`.** [FIXED in v1.2.0]
 `backend/geometry.py:73`
+
+> **Status:** **FIXED** in v1.2.0. `sat_state` clock polynomial wraps
+> `tsv = ((t_gps - eph["toc"] + 302400.0) % 604800.0) - 302400.0`, eliminating
+> week-crossover timing and pseudorange divergence. Verified with
+> `test_sat_state_clock_week_rollover_wrap`.
 
 ```python
 tsv = t_gps - eph["toc"]        # tk gets the ±302400 wrap at :63-66; tsv does not
