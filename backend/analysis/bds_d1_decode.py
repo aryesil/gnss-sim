@@ -1,9 +1,10 @@
 """BeiDou B1I D1 navigation message decoder (BDS-SIS-ICD-B1I-3.0).
 
-Inverse of backend.analysis.bds_d1_encode.
-Implements BCH(15,11,1) decoding, bit deinterleaving, subframe framing,
-ephemeris field extraction, Keplerian ephemeris reconstruction, and
-Neuman-Hofman secondary-code wiped IQ demodulation (demod_symbols_b1i).
+Implements deinterleaving of BCH codewords in words 2..10, BCH(15,11,1) decoding
+with error checking/correction, 300-bit subframe parsing, message assembly from
+continuous symbol stream handling 180-degree carrier phase ambiguity, Keplerian
+ephemeris reconstruction from subframes 1, 2, 3, and IQ demodulation with 20-bit
+Neuman-Hofman secondary code wipe-off.
 """
 from __future__ import annotations
 
@@ -12,223 +13,303 @@ from typing import Any
 
 import numpy as np
 
-from backend.analysis import bds_d1_encode as E
-
-PREAMBLE = [1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0]  # 11 bits
+PREAMBLE = [1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0]  # 11 bits: 0x712
 _BCH_G = 0b10011  # x^4 + x + 1
-_SC = math.pi
+_PI = math.pi
 
-# Neuman-Hofman 20-bit secondary code (1 kHz, bits 0 0 0 0 0 1 0 0 1 1 0 1 0 1 0 0 1 1 1 0)
-# Mapped to {-1, +1} where bit 0 -> +1, bit 1 -> -1
-NH20 = np.array([1, 1, 1, 1, 1, -1, 1, 1, -1, -1, 1, -1, 1, -1, 1, 1, -1, -1, -1, 1], dtype=np.float64)
+# BCH(15,11,1) syndrome to flipped bit index map (0 to 14)
+_SYNDROME_TO_BIT = {
+    0b1001: 0,
+    0b1101: 1,
+    0b1111: 2,
+    0b1110: 3,
+    0b0111: 4,
+    0b1010: 5,
+    0b0101: 6,
+    0b1011: 7,
+    0b1100: 8,
+    0b0110: 9,
+    0b0011: 10,
+    0b1000: 11,
+    0b0100: 12,
+    0b0010: 13,
+    0b0001: 14,
+}
 
 
-def _build_bch_tables():
-    syn_to_pos = {}
-    for pos in range(15):
-        # error polynomial e(x) has a 1 at index pos (MSB is index 0 -> x^14)
-        sh_poly = 1 << (14 - pos)
-        r = sh_poly
-        for sh in range(14, 3, -1):
-            if (r >> sh) & 1:
-                r ^= _BCH_G << (sh - 4)
-        syn_to_pos[r] = pos
-    return syn_to_pos
-
-
-_SYN_TO_POS = _build_bch_tables()
-
-
-def bch_decode(word15: list[int] | np.ndarray) -> tuple[list[int], bool]:
-    """Decode systematic BCH(15,11,1) with single error correction.
-    Returns (11_info_bits, is_valid_or_corrected).
-    """
-    w = [int(b) & 1 for b in word15]
-    if len(w) != 15:
-        return [0] * 11, False
+def bch_syndrome(cw15: list[int] | tuple[int, ...] | np.ndarray) -> int:
+    """Compute BCH(15,11,1) syndrome with g(x) = x^4 + x + 1."""
     r = 0
-    for b in w:
-        r = (r << 1) | b
+    for b in cw15:
+        r = (r << 1) | (int(b) & 1)
     for sh in range(14, 3, -1):
         if (r >> sh) & 1:
             r ^= _BCH_G << (sh - 4)
-    if r == 0:
-        return w[:11], True
-    # Single bit error
-    if r in _SYN_TO_POS:
-        err_pos = _SYN_TO_POS[r]
-        w[err_pos] ^= 1
-        return w[:11], True
-    return w[:11], False
+    return r
 
 
-def deinterleave2(word30: list[int] | np.ndarray) -> tuple[list[int], list[int]]:
-    """Inverse of interleave2: unpack 30 bits into two 15-bit codewords."""
-    w = list(word30)
-    return w[0::2], w[1::2]
+def bch_ok(cw15: list[int] | tuple[int, ...] | np.ndarray) -> bool:
+    """Check if 15-bit codeword has zero BCH syndrome (valid codeword)."""
+    return bch_syndrome(cw15) == 0
 
 
-def icd_order(sf300: list[int] | np.ndarray) -> list[int]:
-    """Transmitted 300 bits -> RTKLIB/ICD bit order."""
-    return E.icd_order(list(sf300))
+def bch_decode(
+    codeword_15: list[int] | tuple[int, ...] | np.ndarray,
+    correct: bool = True,
+) -> list[int]:
+    """Decode systematic BCH(15,11,1) codeword.
+
+    Checks parity with g(x) = x^4 + x + 1. If correct=True, corrects single-bit
+    errors using syndrome lookup. Returns the 11 data bits.
+    """
+    cw = [int(b) & 1 for b in codeword_15]
+    if len(cw) != 15:
+        raise ValueError(f"expected 15 bits, got {len(cw)}")
+    syn = bch_syndrome(cw)
+    if syn == 0:
+        return cw[:11]
+    if correct and syn in _SYNDROME_TO_BIT:
+        bit_idx = _SYNDROME_TO_BIT[syn]
+        cw[bit_idx] ^= 1
+        return cw[:11]
+    return cw[:11]
 
 
-def _u(b: list[int], p: int, n: int) -> int:
-    return int("".join(map(str, b[p:p + n])), 2)
+def deinterleave_words(
+    word_bits: list[int] | tuple[int, ...] | np.ndarray,
+) -> tuple[list[int], list[int]] | list[tuple[list[int], list[int]]]:
+    """Unpack bit-interleaved BCH codewords in words 2..10.
+
+    For a 30-bit word, returns (a15, b15).
+    For multiple concatenated 30-bit words (e.g. 270 bits for words 2..10),
+    returns a list of (a15, b15) tuples.
+    """
+    wb = list(word_bits)
+    if len(wb) == 30:
+        return wb[0::2], wb[1::2]
+    if len(wb) % 30 == 0 and len(wb) > 30:
+        return [
+            (wb[i : i + 30][0::2], wb[i : i + 30][1::2])
+            for i in range(0, len(wb), 30)
+        ]
+    return wb[0::2], wb[1::2]
 
 
-def _s(b: list[int], p: int, n: int) -> int:
-    v = _u(b, p, n)
-    return v - (1 << n) if (v >> (n - 1)) else v
+deinterleave2 = deinterleave_words
 
 
-def _u2(b: list[int], p1: int, l1: int, p2: int, l2: int) -> int:
-    return (_u(b, p1, l1) << l2) | _u(b, p2, l2)
+def _u(bits: list[int], lo: int, n: int) -> int:
+    v = 0
+    for b in bits[lo : lo + n]:
+        v = (v << 1) | int(b)
+    return v
 
 
-def _s2(b: list[int], p1: int, l1: int, p2: int, l2: int) -> int:
-    v = _u2(b, p1, l1, p2, l2)
-    n = l1 + l2
-    return v - (1 << n) if (v >> (n - 1)) else v
+def _s(bits: list[int], lo: int, n: int) -> int:
+    v = _u(bits, lo, n)
+    return v - (1 << n) if v >> (n - 1) else v
 
 
-def decode_subframe(sf300: list[int] | np.ndarray) -> dict[str, Any]:
-    """Decode a 300-bit BeiDou D1 subframe."""
-    b = icd_order(sf300)
-    if b[:11] != PREAMBLE:
-        return {"bch_ok": False, "preamble_ok": False}
-    words = [sf300[i * 30:(i + 1) * 30] for i in range(10)]
-    w1_info, ok1 = bch_decode(words[0][15:30])
-    bch_ok = ok1
+def decode_subframe(bits_300: list[int] | tuple[int, ...] | np.ndarray) -> dict[str, Any]:
+    """Parse a 300-bit subframe, extract FraID (1..5), SOW, and 224 information bits.
+
+    Returns dict with keys:
+        'fra_id': Subframe ID (1..5)
+        'subframe_id': Subframe ID (alias for fra_id)
+        'sow': Seconds of week (BDT)
+        'info': List of 224 information bits
+        'bch_ok': True if all BCH codewords in the subframe had valid parity
+    """
+    b = [int(x) & 1 for x in bits_300]
+    if len(b) != 300:
+        raise ValueError(f"expected 300 bits, got {len(b)}")
+
+    words = [b[i * 30 : (i + 1) * 30] for i in range(10)]
+    if words[0][:11] != PREAMBLE:
+        raise ValueError("preamble mismatch")
+
+    ok = bch_ok(words[0][15:30])
+    info = list(words[0][:15]) + bch_decode(words[0][15:30])
+
     for w in words[1:]:
-        a, b_w = deinterleave2(w)
-        _, oka = bch_decode(a)
-        _, okb = bch_decode(b_w)
-        bch_ok = bch_ok and oka and okb
+        a, b_cw = deinterleave_words(w)
+        ok = ok and bch_ok(a) and bch_ok(b_cw)
+        info += bch_decode(a) + bch_decode(b_cw)
 
-    fra_id = _u(b, 15, 3)
-    sow = _u2(b, 18, 8, 30, 12)
-    fields: dict[str, Any] = {"fra_id": fra_id, "sow": sow}
-
-    if fra_id == 1:
-        fields["week"] = _u(b, 60, 13)
-        fields["toc"] = _u2(b, 73, 9, 90, 8) * 8.0
-        fields["tgd"] = _s(b, 98, 10) * 0.1e-9
-        fields["tgd2"] = _s2(b, 108, 4, 120, 6) * 0.1e-9
-        fields["af2"] = _s(b, 214, 11) * (2.0 ** -66)
-        fields["af0"] = _s2(b, 225, 7, 240, 17) * (2.0 ** -33)
-        fields["af1"] = _s2(b, 257, 5, 270, 17) * (2.0 ** -50)
-        fields["iode"] = _u(b, 287, 5)
-        fields["iodc"] = _u(b, 43, 5)
-    elif fra_id == 2:
-        fields["delta_n"] = _s2(b, 42, 10, 60, 6) * (2.0 ** -43) * _SC
-        fields["cuc"] = _s2(b, 66, 16, 90, 2) * (2.0 ** -31)
-        fields["m0"] = _s2(b, 92, 20, 120, 12) * (2.0 ** -31) * _SC
-        fields["e"] = _u2(b, 132, 10, 150, 22) * (2.0 ** -33)
-        fields["cus"] = _s(b, 180, 18) * (2.0 ** -31)
-        fields["crc"] = _s2(b, 198, 4, 210, 14) * (2.0 ** -6)
-        fields["crs"] = _s2(b, 224, 8, 240, 10) * (2.0 ** -6)
-        fields["sqrtA"] = _u2(b, 250, 12, 270, 20) * (2.0 ** -19)
-        fields["toe_msb"] = _u(b, 290, 2)
-    elif fra_id == 3:
-        fields["toe_lsb"] = _u2(b, 42, 10, 60, 5)
-        fields["i0"] = _s2(b, 65, 17, 90, 15) * (2.0 ** -31) * _SC
-        fields["cic"] = _s2(b, 105, 7, 120, 11) * (2.0 ** -31)
-        fields["omega_dot"] = _s2(b, 131, 11, 150, 13) * (2.0 ** -43) * _SC
-        fields["cis"] = _s2(b, 163, 9, 180, 9) * (2.0 ** -31)
-        fields["idot"] = _s2(b, 189, 13, 210, 1) * (2.0 ** -43) * _SC
-        fields["omega0"] = _s2(b, 211, 21, 240, 11) * (2.0 ** -31) * _SC
-        fields["omega"] = _s2(b, 251, 11, 270, 21) * (2.0 ** -31) * _SC
-
+    fra_id = _u(info, 15, 3)
+    sow = _u(info, 18, 20)
     return {
         "fra_id": fra_id,
+        "subframe_id": fra_id,
         "sow": sow,
-        "bch_ok": bch_ok,
-        "preamble_ok": True,
-        "fields": fields,
-        "icd_bits": b,
+        "info": info,
+        "bch_ok": bool(ok),
     }
 
 
-def decode_messages(sym01: list[int] | np.ndarray) -> list[dict[str, Any]]:
-    """Scan a {0, 1} symbol stream (50 bps) for BeiDou D1 subframes (300 bits).
-    Handles preamble search, frame alignment, and 180-degree polarity ambiguity.
+def decode_messages(
+    stream_sym01: list[int] | tuple[int, ...] | np.ndarray,
+) -> list[dict[str, Any]]:
+    """Search for 11-bit preamble (11100010010), handle 180-deg carrier polarity flip,
+    and assemble valid subframes.
     """
-    sym = [int(x) & 1 for x in sym01]
-    n = len(sym)
-    pre = PREAMBLE
+    arr = np.asarray(stream_sym01)
+    if arr.size and set(np.unique(arr)).issubset({-1, 1}):
+        sym = [1 if x > 0 else 0 for x in arr]
+    else:
+        sym = [int(x) & 1 for x in arr]
 
+    n = len(sym)
     for flip in (0, 1):
         stream = [x ^ flip for x in sym]
-        msgs = []
+        msgs: list[dict[str, Any]] = []
         i = 0
         while i + 300 <= n:
-            if stream[i:i + 11] == pre:
-                sf = decode_subframe(stream[i:i + 300])
-                if sf.get("bch_ok"):
-                    msgs.append(sf)
-                    i += 300
-                    continue
+            if stream[i : i + 11] == PREAMBLE:
+                try:
+                    sf = decode_subframe(stream[i : i + 300])
+                    if sf["bch_ok"]:
+                        msgs.append(sf)
+                        i += 300
+                        continue
+                except (ValueError, IndexError):
+                    pass
             i += 1
         if msgs:
             return msgs
     return []
 
 
-def reconstruct_ephemeris(msgs: list[dict[str, Any]], *, prn: int = 1) -> dict[str, Any]:
-    """Reconstruct a complete BeiDou ephemeris record from subframes 1, 2, and 3."""
-    by_fraid = {}
-    for m in msgs:
-        if m.get("bch_ok") and m.get("fields"):
-            fraid = m["fra_id"]
-            by_fraid[fraid] = m["fields"]
+def reconstruct_ephemeris(
+    subframes: list[dict[str, Any]] | dict[int, Any],
+) -> dict[str, Any]:
+    """Combine subframes 1, 2, 3 into a standard ephemeris dict for system 'C'.
 
-    required = {1, 2, 3}
-    if not required.issubset(by_fraid):
-        raise ValueError(f"need BCH-valid BeiDou D1 subframes 1, 2 and 3, got {sorted(by_fraid.keys())}")
+    Extracts:
+        system: 'C'
+        bdt_week: BDT week number
+        af0, af1, af2: Clock polynomial coefficients
+        toe, toc: Epoch times in seconds
+        tgd, tgd2: Equipment group delays
+        semi-major axis (sqrtA and A), eccentricity (e)
+        angles in radians (m0, omega0, omega, i0, delta_n, omega_dot, idot)
+        harmonic correction terms (cuc, cus, crc, crs, cic, cis)
+    """
+    by_id: dict[int, list[int]] = {}
+    if isinstance(subframes, dict):
+        for k, v in subframes.items():
+            fid = int(k)
+            if isinstance(v, dict) and "info" in v:
+                by_id[fid] = v["info"]
+            elif isinstance(v, (list, tuple, np.ndarray)):
+                by_id[fid] = [int(x) & 1 for x in v]
+    elif isinstance(subframes, (list, tuple)):
+        for sf in subframes:
+            if isinstance(sf, dict):
+                fid = sf.get("fra_id") or sf.get("subframe_id")
+                if fid and "info" in sf:
+                    by_id.setdefault(int(fid), sf["info"])
 
-    f1 = by_fraid[1]
-    f2 = by_fraid[2]
-    f3 = by_fraid[3]
+    if not {1, 2, 3} <= set(by_id):
+        raise ValueError(f"need subframes 1, 2 and 3, got {sorted(by_id.keys())}")
 
-    toe = float(((f2["toe_msb"] << 15) | f3["toe_lsb"]) * 8.0)
+    b1 = by_id[1]
+    b2 = by_id[2]
+    b3 = by_id[3]
 
-    rec = {
+    # --- Subframe 1: Clock & timing ---
+    health = float(_u(b1, 38, 1))
+    iodc = float(_u(b1, 39, 5))
+    urai = int(_u(b1, 44, 4))
+    bdt_week = int(_u(b1, 48, 13))
+    toc = float(_u(b1, 61, 17) * 8.0)
+    tgd = float(_s(b1, 78, 10) * 0.1e-9)
+    tgd2 = float(_s(b1, 88, 10) * 0.1e-9)
+
+    iono_alpha = tuple(
+        float(_s(b1, 98 + i * 8, 8) * sc)
+        for i, sc in enumerate((2**-30, 2**-27, 2**-24, 2**-24))
+    )
+    iono_beta = tuple(
+        float(_s(b1, 130 + i * 8, 8) * sc)
+        for i, sc in enumerate((2**11, 2**14, 2**16, 2**16))
+    )
+
+    af2 = float(_s(b1, 162, 11) * (2**-66))
+    af0 = float(_s(b1, 173, 24) * (2**-33))
+    af1 = float(_s(b1, 197, 22) * (2**-50))
+    iode = float(_u(b1, 219, 5))
+
+    # --- Subframe 2: Ephemeris 1 ---
+    delta_n = float(_s(b2, 38, 16) * (2**-43) * _PI)
+    cuc = float(_s(b2, 54, 18) * (2**-31))
+    m0 = float(_s(b2, 72, 32) * (2**-31) * _PI)
+    e = float(_u(b2, 104, 32) * (2**-33))
+    cus = float(_s(b2, 136, 18) * (2**-31))
+    crc = float(_s(b2, 154, 18) * (2**-6))
+    crs = float(_s(b2, 172, 18) * (2**-6))
+    sqrtA = float(_u(b2, 190, 32) * (2**-19))
+    toe_msb = _u(b2, 222, 2)
+
+    # --- Subframe 3: Ephemeris 2 ---
+    toe_lsb = _u(b3, 38, 15)
+    toe = float(((toe_msb << 15) | toe_lsb) * 8.0)
+    i0 = float(_s(b3, 53, 32) * (2**-31) * _PI)
+    cic = float(_s(b3, 85, 18) * (2**-31))
+    omega_dot = float(_s(b3, 103, 24) * (2**-43) * _PI)
+    cis = float(_s(b3, 127, 18) * (2**-31))
+    idot = float(_s(b3, 145, 14) * (2**-43) * _PI)
+    omega0 = float(_s(b3, 159, 32) * (2**-31) * _PI)
+    omega = float(_s(b3, 191, 32) * (2**-31) * _PI)
+
+    sow = float(_u(b1, 18, 20))
+
+    return {
         "system": "C",
-        "prn": prn,
-        "bdt_week": int(f1["week"]),
-        "toc": float(f1["toc"]),
-        "tgd": float(f1["tgd"]),
-        "tgd2": float(f1.get("tgd2", 0.0)),
-        "af0": float(f1["af0"]),
-        "af1": float(f1["af1"]),
-        "af2": float(f1["af2"]),
-        "iode": int(f1["iode"]),
-        "iodc": int(f1.get("iodc", 0)),
-        "delta_n": float(f2["delta_n"]),
-        "cuc": float(f2["cuc"]),
-        "m0": float(f2["m0"]),
-        "e": float(f2["e"]),
-        "cus": float(f2["cus"]),
-        "crc": float(f2["crc"]),
-        "crs": float(f2["crs"]),
-        "sqrtA": float(f2["sqrtA"]),
+        "bdt_week": bdt_week,
+        "week": bdt_week,
+        "gps_week": bdt_week + 1356,
+        "toc": toc,
         "toe": toe,
-        "i0": float(f3["i0"]),
-        "cic": float(f3["cic"]),
-        "omega_dot": float(f3["omega_dot"]),
-        "cis": float(f3["cis"]),
-        "idot": float(f3["idot"]),
-        "omega0": float(f3["omega0"]),
-        "omega": float(f3["omega"]),
+        "sow": sow,
+        "health": health,
+        "iodc": iodc,
+        "iode": iode,
+        "urai": urai,
+        "af0": af0,
+        "af1": af1,
+        "af2": af2,
+        "tgd": tgd,
+        "tgd2": tgd2,
+        "sqrtA": sqrtA,
+        "A": sqrtA**2,
+        "e": e,
+        "m0": m0,
+        "delta_n": delta_n,
+        "i0": i0,
+        "idot": idot,
+        "omega0": omega0,
+        "omega": omega,
+        "omega_dot": omega_dot,
+        "cuc": cuc,
+        "cus": cus,
+        "crc": crc,
+        "crs": crs,
+        "cic": cic,
+        "cis": cis,
+        "iono_alpha": iono_alpha,
+        "iono_beta": iono_beta,
+        "iono": (iono_alpha, iono_beta),
     }
-    return rec
 
+
+# --- IQ -> B1I D1 symbols ---------------------------------------------------
 
 _B1I_LEN = 2046
 _B1I_CHIP_HZ = 2.046e6
-_B1I_CTR_HZ = 1_561_098_000.0  # config.B1I_HZ
-_B1I_MS_S = 0.001              # 1 ms period = 2046 chips
+_B1I_CTR_HZ = 1_561_098_000.0
+_B1I_MS_S = 0.001
+_B1I_SYM_S = 0.020  # 20 ms = 50 bps
 
 
 def demod_symbols_b1i(
@@ -239,11 +320,11 @@ def demod_symbols_b1i(
     dopp_hz: float | None = None,
     code_phase_chips: float | None = None,
     centre_offset_hz: float = 0.0,
-    is_geo: bool = False,
 ) -> np.ndarray:
-    """Demodulate hard {0, 1} D1 navigation bits (50 bps) from BeiDou B1I IQ.
-    Wipes Doppler and correlates against B1I primary code at 1 kHz,
-    syncs/wipes the 20-bit Neuman-Hofman secondary code, and resolves BPSK bits.
+    """Demodulate BeiDou B1I IQ into 50 bps D1 bits using B1I primary code +
+    20-bit Neuman-Hofman secondary code wipe-off.
+
+    Returns {0, 1} bits as int8 array.
     """
     from backend.analysis import l1_acquire
     from backend.synth import _lib
@@ -265,11 +346,12 @@ def demod_symbols_b1i(
             acq["code_phase_chips"] if code_phase_chips is None else code_phase_chips
         )
 
-    code = _lib.code(3, int(prn), _B1I_LEN, 0)[0].astype(np.float64)
+    code, sec = _lib.code(3, int(prn), _B1I_LEN, 20)
+    code = code.astype(np.float64)
+    sec = sec.astype(np.float64)
 
-    npp = int(round(fs * _B1I_MS_S))  # samples per 1 ms period
-    nms = len(iq) // npp
-    if nms < 20:
+    npp = int(round(fs * _B1I_MS_S))
+    if npp <= 0 or len(iq) < npp * 20:
         return np.zeros(0, dtype=np.int8)
 
     cp0 = (_B1I_LEN - float(code_phase_chips)) % _B1I_LEN
@@ -277,11 +359,11 @@ def demod_symbols_b1i(
     if e0 + npp * 20 > len(iq):
         e0 = 0
     base = iq[e0:]
-    nms = base.size // npp
-    if nms < 20:
+    avail_ms = base.size // npp
+    if avail_ms < 20:
         return np.zeros(0, dtype=np.int8)
 
-    t = (np.arange(nms * npp, dtype=np.float64) + e0) / fs
+    t = (np.arange(avail_ms * npp, dtype=np.float64) + e0) / fs
     carrier_freq = centre_offset_hz + float(dopp_hz)
     wipe = np.exp(-2j * np.pi * carrier_freq * t)
 
@@ -291,46 +373,36 @@ def demod_symbols_b1i(
     chip_idx = np.floor(cph).astype(np.int64)
     rep = code[chip_idx]
 
-    # 1 ms correlation values (1000 sps)
-    corr_1ms = (base[: nms * npp] * wipe * rep).reshape(nms, npp).sum(axis=1)
+    ms_corr = (base[: avail_ms * npp] * wipe * rep).reshape(avail_ms, npp).sum(axis=1)
 
-    if is_geo:
-        # Flat secondary code (+1)
-        nbits = nms // 20
-        seg = corr_1ms[: nbits * 20].reshape(nbits, 20).sum(axis=1)
-    else:
-        # MEO/IGSO: 20-bit Neuman-Hofman secondary code
-        # Find NH20 alignment offset (0..19)
-        nh = NH20
-        best_off = 0
-        best_score = -1.0
-        for off in range(20):
-            avail = (nms - off) // 20
-            if avail < 1:
-                continue
-            blocks = corr_1ms[off : off + avail * 20].reshape(avail, 20)
-            score = float(np.sum(np.abs(np.sum(blocks * nh, axis=1))))
-            if score > best_score:
-                best_score = score
-                best_off = off
+    # Search for the 20-ms secondary code alignment offset
+    best_off, best_en = 0, -1.0
+    for off in range(20):
+        n_s = (avail_ms - off) // 20
+        if n_s <= 0:
+            continue
+        blks = ms_corr[off : off + n_s * 20].reshape(n_s, 20)
+        wiped = (blks * sec).sum(axis=1)
+        en = float(np.sum(np.abs(wiped) ** 2))
+        if en > best_en:
+            best_off, best_en = off, en
 
-        nbits = (nms - best_off) // 20
-        if nbits == 0:
-            return np.zeros(0, dtype=np.int8)
-        blocks = corr_1ms[best_off : best_off + nbits * 20].reshape(nbits, 20)
-        seg = np.sum(blocks * nh, axis=1)
+    nsym = (avail_ms - best_off) // 20
+    if nsym == 0:
+        return np.zeros(0, dtype=np.int8)
 
-    # Carrier phase drift removal
+    blks = ms_corr[best_off : best_off + nsym * 20].reshape(nsym, 20)
+    seg = (blks * sec).sum(axis=1)
+
     ph = np.unwrap(np.angle(seg ** 2))
-    deg = 2 if nbits >= 8 else 1
-    bi = np.arange(nbits, dtype=np.float64)
+    deg = 2 if nsym >= 8 else 1
+    bi = np.arange(nsym, dtype=np.float64)
     coef = np.polyfit(bi, ph, deg) / 2.0
     seg = seg * np.exp(-1j * np.polyval(coef, bi))
     phi0 = 0.5 * np.angle(np.sum(seg ** 2))
     seg = seg * np.exp(-1j * phi0)
 
-    # Note: bit 0 -> +1 (real > 0 -> 0), bit 1 -> -1 (real < 0 -> 1)
-    return np.where(np.real(seg) > 0, np.int8(0), np.int8(1)).astype(np.int8)
+    return np.where(np.real(seg) > 0, np.int8(1), np.int8(0)).astype(np.int8)
 
 
 demod_symbols = demod_symbols_b1i
