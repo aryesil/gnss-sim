@@ -606,28 +606,33 @@ def fix_from_iq(iq_path, sample_format, sample_rate, eph_by_prn,
                     sysc = sv.get("sys")
                     prn = sv.get("prn")
                     band_id = sv.get("band", "L1")
-                    if sysc == "E":
-                        b_info = next((b for b in meta.get("bands", []) if b["id"] == band_id), None)
-                        if b_info:
-                            bf = outdir / b_info["file"]
-                            iq_long = inspector.read_iq(bf, sample_format, max_samples=int(b_info["fs"] * 14.0))
-                            syms = inav_decode.demod_symbols_e1b(iq_long, b_info["fs"], prn, centre_offset_hz=sv.get("if_hz", 0.0))
+                    b_info = next((b for b in meta.get("bands", []) if b["id"] == band_id), None)
+                    if b_info:
+                        bf = outdir / b_info["file"]
+                        b_fs = b_info["fs"]
+                    else:
+                        bf = pathlib.Path(iq_path)
+                        b_fs = sample_rate
+                    if bf.exists():
+                        if sysc == "E":
+                            iq_long = inspector.read_iq(bf, sample_format, max_samples=int(b_fs * 14.0))
+                            syms = inav_decode.demod_symbols_e1b(iq_long, b_fs, prn, centre_offset_hz=sv.get("if_hz", 0.0))
                             if len(syms) >= 500:
                                 msgs = inav_decode.decode_messages(syms)
                                 try:
-                                    eph_by_prn[("E", prn)] = inav_decode.reconstruct_ephemeris(msgs)
+                                    rec = inav_decode.reconstruct_ephemeris(msgs)
+                                    rec["prn"] = prn
+                                    eph_by_prn[("E", prn)] = rec
                                 except Exception:
                                     pass
-                    elif sysc == "C":
-                        b_info = next((b for b in meta.get("bands", []) if b["id"] == band_id), None)
-                        if b_info:
-                            bf = outdir / b_info["file"]
-                            iq_long = inspector.read_iq(bf, sample_format, max_samples=int(b_info["fs"] * 24.0))
-                            syms = bds_d1_decode.demod_symbols_b1i(iq_long, b_info["fs"], prn, centre_offset_hz=sv.get("if_hz", 0.0))
+                        elif sysc == "C":
+                            iq_long = inspector.read_iq(bf, sample_format, max_samples=int(b_fs * 24.0))
+                            syms = bds_d1_decode.demod_symbols_b1i(iq_long, b_fs, prn, centre_offset_hz=sv.get("if_hz", 0.0))
                             if len(syms) >= 300:
                                 msgs = bds_d1_decode.decode_messages(syms)
                                 try:
-                                    eph_by_prn[("C", prn)] = bds_d1_decode.reconstruct_ephemeris(msgs, prn=prn)
+                                    rec = bds_d1_decode.reconstruct_ephemeris(msgs, prn=prn)
+                                    eph_by_prn[("C", prn)] = rec
                                 except Exception:
                                     pass
             if not eph_by_prn and rinex_path:
