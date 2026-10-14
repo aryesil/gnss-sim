@@ -99,7 +99,13 @@ def _bds_geo_ecef(xp, yp, i, Omega_geo, wdot_tk):
     return np.array([cz * x1 + sz * y1, -sz * x1 + cz * y1, z1])
 
 
-def sat_state(eph: dict, t_gps: float):
+def _sat_pos(eph: dict, t_gps: float):
+    """Compute satellite position and orbital parameters from broadcast ephemeris.
+
+    Evaluates the Keplerian orbit exactly once (1 call to ``_orbit``) and returns
+    ECEF position (handling BeiDou GEO rotation when appropriate), eccentric anomaly
+    ``E``, time offset ``tk``, and orbital constants.
+    """
     sysp = SYS_PARAMS.get(eph.get("system", "G"), SYS_PARAMS["G"])
     mu, wdot, frel = sysp["mu"], sysp["omega_e_dot"], sysp["f_rel"]
     tk = t_gps - eph["toe"]
@@ -110,14 +116,24 @@ def sat_state(eph: dict, t_gps: float):
     is_bds_geo = eph.get("system") == "C" and (
         eph.get("prn") in _BDS_GEO_PRNS or abs(eph["i0"]) < _BDS_GEO_INC_RAD)
 
+    xp, yp, i, Omega, E = _orbit(eph, tk, mu, wdot)
+    if is_bds_geo:
+        pos = _bds_geo_ecef(xp, yp, i, Omega + wdot * tk, wdot * tk)
+    else:
+        pos = _ecef_from_orbit(xp, yp, i, Omega)
+    return pos, E, tk, mu, wdot, is_bds_geo, frel
+
+
+def sat_state(eph: dict, t_gps: float):
+    """Return (pos_ecef, vel_ecef, clk_bias_s) for a broadcast ephemeris record."""
+    pos, E, tk, mu, wdot, is_bds_geo, frel = _sat_pos(eph, t_gps)
+
     def _p(ttk):
         xp, yp, i, Omega, _E = _orbit(eph, ttk, mu, wdot)
         if is_bds_geo:
             return _bds_geo_ecef(xp, yp, i, Omega + wdot * ttk, wdot * ttk)
         return _ecef_from_orbit(xp, yp, i, Omega)
 
-    xp, yp, i, Omega, E = _orbit(eph, tk, mu, wdot)
-    pos = _p(tk)
     dt = 0.5
     vel = (_p(tk + dt) - _p(tk - dt)) / (2 * dt)
     tsv = ((t_gps - eph["toc"] + 302400.0) % 604800.0) - 302400.0
@@ -155,15 +171,56 @@ def as_state_fn(eph):
     return lambda t_gps: sat_state(eph, t_gps)
 
 
-def solve_transmit_time(eph, rx_ecef, t_rx: float):
+def solve_transmit_time(eph, rx_ecef, t_rx: float, *, compute_vel: bool = True):
+    """Iteratively solve for transmit time t_tx = t_rx - tof and Sagnac-rotated position.
+
+    Uses a fast position-only iteration with early exit tolerance (|delta_tof| < 1e-11 s,
+    typically converging in 2-3 iterations). Velocity is evaluated only once upon convergence
+    if compute_vel is True.
+    """
     rx = np.asarray(rx_ecef, float)
-    state_fn = as_state_fn(eph)
+    if callable(eph):
+        state_fn = as_state_fn(eph)
+        tof = 0.075
+        for _ in range(8):
+            t_tx = t_rx - tof
+            pos, vel, clk = state_fn(t_tx)
+            pos_rot = _rotate_z(pos, config.OMEGA_E_DOT * tof)
+            new_tof = float(np.linalg.norm(pos_rot - rx) / config.C)
+            if abs(new_tof - tof) < 1e-11:
+                tof = new_tof
+                break
+            tof = new_tof
+        return pos_rot, vel, float(tof), float(clk)
+
     tof = 0.075
     for _ in range(8):
         t_tx = t_rx - tof
-        pos, vel, clk = state_fn(t_tx)
+        pos, E, tk, mu, wdot, is_bds_geo, frel = _sat_pos(eph, t_tx)
         pos_rot = _rotate_z(pos, config.OMEGA_E_DOT * tof)
-        tof = np.linalg.norm(pos_rot - rx) / config.C
+        new_tof = float(np.linalg.norm(pos_rot - rx) / config.C)
+        if abs(new_tof - tof) < 1e-11:
+            tof = new_tof
+            break
+        tof = new_tof
+
+    tsv = ((t_tx - eph["toc"] + 302400.0) % 604800.0) - 302400.0
+    clk = (eph["af0"] + eph["af1"] * tsv + eph["af2"] * tsv ** 2
+           + frel * eph["e"] * eph["sqrtA"] * np.sin(E))
+
+    if not compute_vel:
+        vel = np.zeros(3, dtype=float)
+    else:
+        dt = 0.5
+
+        def _p(ttk):
+            xp, yp, i, Omega, _E = _orbit(eph, ttk, mu, wdot)
+            if is_bds_geo:
+                return _bds_geo_ecef(xp, yp, i, Omega + wdot * ttk, wdot * ttk)
+            return _ecef_from_orbit(xp, yp, i, Omega)
+
+        vel = (_p(tk + dt) - _p(tk - dt)) / (2 * dt)
+
     return pos_rot, vel, float(tof), float(clk)
 
 
@@ -345,7 +402,10 @@ def dop(entries: list[dict], rx_ecef) -> dict:
         los = np.asarray(ent["_los"], float)
         rows.append([los @ e, los @ n, los @ u, 1.0])
     G = np.array(rows)
-    Q = np.linalg.inv(G.T @ G)
+    try:
+        Q = np.linalg.inv(G.T @ G)
+    except np.linalg.LinAlgError:
+        return {k: float("inf") for k in ("gdop", "pdop", "hdop", "vdop", "tdop")}
     return {
         "gdop": float(np.sqrt(np.trace(Q))),
         "pdop": float(np.sqrt(Q[0, 0] + Q[1, 1] + Q[2, 2])),

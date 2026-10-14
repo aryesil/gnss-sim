@@ -8,115 +8,50 @@ reconstruction from a CRC-valid set of words 1, 2, 3, 4.
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 
 from backend.analysis import _inav_layout as L
-from backend.analysis._crc import crc24q
+from backend.analysis import _viterbi
+from backend.analysis._bit_utils import (
+    deinterleave_block,
+    normalize_symbols,
+    parity_bit,
+    unpack_field,
+    unpack_int,
+    unpack_uint,
+)
+from backend.analysis._crc import check_crc24q, crc24q
+from backend.analysis._demod_utils import derotate_bpsk_carrier
 
-_G1 = 0o171
-_G2 = 0o133
+_G1 = _viterbi._G1
+_G2 = _viterbi._G2
 _PI = math.pi
+_NXT = _viterbi._NXT_INV
+_OUT = _viterbi._OUT_INV
+
+_parity = parity_bit
+_u = unpack_uint
+_s = unpack_int
+_field = unpack_field
 
 
-def _parity(x: int) -> int:
-    return bin(x).count("1") & 1
-
-
-def deinterleave_30x8(sym) -> list[int]:
+def deinterleave_30x8(sym: Sequence[int] | np.ndarray) -> list[int]:
     """Block deinterleaver: read 8 rows x 30 cols that were written by rows and read by cols."""
-    a = np.asarray(list(sym)).reshape(30, 8)
-    return a.T.reshape(L.CODED_SYMS).tolist()
+    return deinterleave_block(sym, rows=30, cols=8)
 
 
-def viterbi_free_decode(coded) -> list[int]:
+def viterbi_free_decode(coded: Sequence[int] | np.ndarray) -> list[int]:
     """Exact inverse of inav_encode.conv_encode for clean channel from initial state 0."""
-    reg = 0
-    out: list[int] = []
-    coded = [int(s) & 1 for s in coded]
-    for i in range(0, len(coded) - 1, 2):
-        c1, c2 = coded[i], coded[i + 1]
-        for cand in (0, 1):
-            r = ((reg << 1) | cand) & 0x7F
-            if _parity(r & _G1) == c1 and (_parity(r & _G2) ^ 1) == c2:
-                out.append(cand)
-                reg = r
-                break
-        else:
-            out.append(0)
-            reg = (reg << 1) & 0x7F
-    return out
+    return _viterbi.viterbi_free_decode(coded, invert_g2=True)
 
 
-def _viterbi_tables():
-    """Trellis transition tables for rate-1/2 K=7 code with G2 inverted."""
-    nxt = np.zeros((64, 2), dtype=np.int64)
-    out = np.zeros((64, 2, 2), dtype=np.int64)
-    for st in range(64):
-        for b in (0, 1):
-            r = ((st << 1) | b) & 0x7F
-            nxt[st, b] = r & 0x3F
-            out[st, b, 0] = _parity(r & _G1)
-            out[st, b, 1] = _parity(r & _G2) ^ 1
-    return nxt, out
-
-
-_NXT, _OUT = _viterbi_tables()
-
-
-def viterbi_decode(coded) -> list[int]:
+def viterbi_decode(coded: Sequence[int] | np.ndarray) -> list[int]:
     """Hard-decision Viterbi decoder for rate-1/2 K=7 convolutional code with G2 inverted.
     Known starting state is 0 (each page part starts from state 0).
     """
-    s = np.asarray([int(x) & 1 for x in coded], dtype=np.int64)
-    n = s.size // 2
-    if n == 0:
-        return []
-    pairs = s[: 2 * n].reshape(n, 2)
-    metric = np.full(64, np.inf)
-    metric[0] = 0.0
-
-    prev = np.zeros((n, 64), dtype=np.int64)
-    bit = np.zeros((n, 64), dtype=np.int8)
-    src = np.repeat(np.arange(64), 2)
-    bsrc = np.tile([0, 1], 64)
-    dst = _NXT[src, bsrc]
-
-    for k in range(n):
-        cost = metric[src] + (_OUT[src, bsrc, 0] != pairs[k, 0]) + (_OUT[src, bsrc, 1] != pairs[k, 1])
-        order = np.lexsort((cost, dst))
-        first = np.ones(order.size, dtype=bool)
-        first[1:] = dst[order][1:] != dst[order][:-1]
-        win = order[first]
-        new = np.full(64, np.inf)
-        new[dst[win]] = cost[win]
-        prev[k, dst[win]] = src[win]
-        bit[k, dst[win]] = bsrc[win]
-        metric = new
-
-    st = int(np.argmin(metric))
-    bits = np.zeros(n, dtype=np.int8)
-    for k in range(n - 1, -1, -1):
-        bits[k] = bit[k, st]
-        st = int(prev[k, st])
-    return bits.tolist()
-
-
-def _u(bits: list[int], lo: int = 0, n: int | None = None) -> int:
-    if n is None:
-        n = len(bits) - lo
-    v = 0
-    for b in bits[lo : lo + n]:
-        v = (v << 1) | (int(b) & 1)
-    return v
-
-
-def _field(bits: list[int], lo: int, kind: str, scale: float, n: int) -> float | int:
-    v = _u(bits, lo, n)
-    if kind == "s" and (v & (1 << (n - 1))):
-        v -= 1 << n
-    return v * scale
+    return _viterbi.viterbi_decode(coded, invert_g2=True, known_start_state=0)
 
 
 def decode_word_fields(wtype: int, word_bits: list[int]) -> dict[str, Any]:
@@ -184,7 +119,7 @@ def decode_messages(sym01: list[int] | np.ndarray) -> list[dict[str, Any]]:
     Handles sync pattern searching, page part pairing, CRC-24Q checking,
     and carrier phase ambiguity (polarity flip).
     """
-    sym = [int(x) & 1 for x in sym01]
+    sym = normalize_symbols(sym01, bpsk_sign=False)
     n = len(sym)
     sync = L.SYNC_PATTERN
 
@@ -342,29 +277,30 @@ def demod_symbols_e1b(
     if nsym == 0:
         return np.zeros(0, dtype=np.int8)
 
-    t = (np.arange(nsym * npp, dtype=np.float64) + e0) / fs
     carrier_freq = centre_offset_hz + float(dopp_hz)
-    wipe = np.exp(-2j * np.pi * carrier_freq * t)
+    rate_div_ctr = (_E1_CHIP_HZ / _E1_CTR_HZ) * float(dopp_hz)
+    inv_fs = 1.0 / fs
 
-    cph = (
-        cp0 + _E1_CHIP_HZ * t + (_E1_CHIP_HZ / _E1_CTR_HZ) * float(dopp_hz) * t
-    ) % _E1_LEN
-    chip_idx = np.floor(cph).astype(np.int64)
-    sub = np.where(np.floor(2.0 * cph).astype(np.int64) & 1, -1.0, 1.0)
-    rep = code[chip_idx] * sub
+    seg = np.empty(nsym, dtype=np.complex64)
+    # Bound chunk size so peak temporary buffer never exceeds ~250k samples (< 20 MB)
+    max_chunk_samples = 250_000
+    chunk_sym = max(1, min(100, int(max_chunk_samples // max(1, npp))))
 
-    seg = (base[: nsym * npp] * wipe * rep).reshape(nsym, npp).sum(axis=1)
+    for s0 in range(0, nsym, chunk_sym):
+        s1 = min(s0 + chunk_sym, nsym)
+        n_chk = s1 - s0
+        k0 = s0 * npp
+        k1 = s1 * npp
+        t_chk = (np.arange(k0, k1, dtype=np.float64) + e0) * inv_fs
+        wipe_chk = np.exp(-2j * np.pi * carrier_freq * t_chk).astype(np.complex64)
+        cph_chk = (cp0 + _E1_CHIP_HZ * t_chk + rate_div_ctr * t_chk) % _E1_LEN
+        chip_idx_chk = np.floor(cph_chk).astype(np.int32)
+        sub_chk = np.where(np.floor(2.0 * cph_chk).astype(np.int32) & 1, -1.0, 1.0).astype(np.float32)
+        rep_chk = code[chip_idx_chk].astype(np.float32) * sub_chk
+        seg[s0:s1] = (base[k0:k1] * wipe_chk * rep_chk).reshape(n_chk, npp).sum(axis=1)
 
-    ph = np.unwrap(np.angle(seg ** 2))
-    deg = 2 if nsym >= 8 else 1
-    bi = np.arange(nsym, dtype=np.float64)
-    coef = np.polyfit(bi, ph, deg) / 2.0
-    seg = seg * np.exp(-1j * np.polyval(coef, bi))
-    phi0 = 0.5 * np.angle(np.sum(seg ** 2))
-    seg = seg * np.exp(-1j * phi0)
-
+    seg = derotate_bpsk_carrier(seg, deg=2)
     return np.where(np.real(seg) > 0, np.int8(1), np.int8(0)).astype(np.int8)
 
 
 demod_symbols = demod_symbols_e1b
-

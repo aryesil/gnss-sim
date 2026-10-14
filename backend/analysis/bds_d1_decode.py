@@ -13,6 +13,14 @@ from typing import Any
 
 import numpy as np
 
+from backend.analysis._bit_utils import (
+    normalize_symbols,
+    unpack_field,
+    unpack_int,
+    unpack_uint,
+)
+from backend.analysis._demod_utils import derotate_bpsk_carrier
+
 PREAMBLE = [1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0]  # 11 bits: 0x712
 _BCH_G = 0b10011  # x^4 + x + 1
 _PI = math.pi
@@ -97,17 +105,9 @@ def deinterleave_words(
 
 deinterleave2 = deinterleave_words
 
-
-def _u(bits: list[int], lo: int, n: int) -> int:
-    v = 0
-    for b in bits[lo : lo + n]:
-        v = (v << 1) | int(b)
-    return v
-
-
-def _s(bits: list[int], lo: int, n: int) -> int:
-    v = _u(bits, lo, n)
-    return v - (1 << n) if v >> (n - 1) else v
+_u = unpack_uint
+_s = unpack_int
+_field = unpack_field
 
 
 def decode_subframe(bits_300: list[int] | tuple[int, ...] | np.ndarray) -> dict[str, Any]:
@@ -153,12 +153,7 @@ def decode_messages(
     """Search for 11-bit preamble (11100010010), handle 180-deg carrier polarity flip,
     and assemble valid subframes.
     """
-    arr = np.asarray(stream_sym01)
-    if arr.size and set(np.unique(arr)).issubset({-1, 1}):
-        sym = [1 if x > 0 else 0 for x in arr]
-    else:
-        sym = [int(x) & 1 for x in arr]
-
+    sym = normalize_symbols(stream_sym01, bpsk_sign=False)
     n = len(sym)
     for flip in (0, 1):
         stream = [x ^ flip for x in sym]
@@ -367,17 +362,26 @@ def demod_symbols_b1i(
     if avail_ms < 20:
         return np.zeros(0, dtype=np.int8)
 
-    t = (np.arange(avail_ms * npp, dtype=np.float64) + e0) / fs
     carrier_freq = centre_offset_hz + float(dopp_hz)
-    wipe = np.exp(-2j * np.pi * carrier_freq * t)
+    rate_div_ctr = (_B1I_CHIP_HZ / _B1I_CTR_HZ) * float(dopp_hz)
+    inv_fs = 1.0 / fs
 
-    cph = (
-        cp0 + _B1I_CHIP_HZ * t + (_B1I_CHIP_HZ / _B1I_CTR_HZ) * float(dopp_hz) * t
-    ) % _B1I_LEN
-    chip_idx = np.floor(cph).astype(np.int64)
-    rep = code[chip_idx]
+    ms_corr = np.empty(avail_ms, dtype=np.complex64)
+    # Bound chunk size so peak temporary buffer never exceeds ~250k samples (< 20 MB)
+    max_chunk_samples = 250_000
+    chunk_ms = max(20, min(100, int(max_chunk_samples // max(1, npp))))
 
-    ms_corr = (base[: avail_ms * npp] * wipe * rep).reshape(avail_ms, npp).sum(axis=1)
+    for m0 in range(0, avail_ms, chunk_ms):
+        m1 = min(m0 + chunk_ms, avail_ms)
+        n_chk = m1 - m0
+        k0 = m0 * npp
+        k1 = m1 * npp
+        t_chk = (np.arange(k0, k1, dtype=np.float64) + e0) * inv_fs
+        wipe_chk = np.exp(-2j * np.pi * carrier_freq * t_chk).astype(np.complex64)
+        cph_chk = (cp0 + _B1I_CHIP_HZ * t_chk + rate_div_ctr * t_chk) % _B1I_LEN
+        chip_idx_chk = np.floor(cph_chk).astype(np.int32)
+        rep_chk = code[chip_idx_chk].astype(np.float32)
+        ms_corr[m0:m1] = (base[k0:k1] * wipe_chk * rep_chk).reshape(n_chk, npp).sum(axis=1)
 
     # Search for the 20-ms secondary code alignment offset
     best_off, best_en = 0, -1.0
@@ -397,14 +401,7 @@ def demod_symbols_b1i(
 
     blks = ms_corr[best_off : best_off + nsym * 20].reshape(nsym, 20)
     seg = (blks * sec).sum(axis=1)
-
-    ph = np.unwrap(np.angle(seg ** 2))
-    deg = 2 if nsym >= 8 else 1
-    bi = np.arange(nsym, dtype=np.float64)
-    coef = np.polyfit(bi, ph, deg) / 2.0
-    seg = seg * np.exp(-1j * np.polyval(coef, bi))
-    phi0 = 0.5 * np.angle(np.sum(seg ** 2))
-    seg = seg * np.exp(-1j * phi0)
+    seg = derotate_bpsk_carrier(seg, deg=2)
 
     return np.where(np.real(seg) > 0, np.int8(1), np.int8(0)).astype(np.int8)
 
