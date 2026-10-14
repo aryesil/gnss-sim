@@ -16,7 +16,7 @@ gps-sdr-sim/
 logs/
 out/
 
-# Local AI planning docs -- never pushed, code changes only
-docs/superpowers/
+# Local AI planning docs & docs folder
+docs/
 coordination/
 backend/synth/native/*.d
