@@ -138,16 +138,16 @@ def test_deinterleave_block():
 
 
 def test_crc24q_standard_vectors():
-    # Standard ASCII test vector '123456789'
+    # Standard ASCII test vector '123456789' -> standard 0xCDE703
     ascii_bits = [(c >> (7 - i)) & 1 for c in b"123456789" for i in range(8)]
     v = crc24q(ascii_bits)
-    assert hex(int("".join(map(str, v)), 2)) == "0xc0f7af"
+    assert hex(int("".join(map(str, v)), 2)) == "0xcde703"
 
     # Zero sequence
     assert crc24q([0] * 200) == [0] * 24
 
-    # Single bit 1
-    assert hex(int("".join(map(str, crc24q([1]))), 2)) == "0x360952"
+    # Single bit 1 (0x1864CFB & 0xFFFFFF = 0x864CFB)
+    assert hex(int("".join(map(str, crc24q([1]))), 2)) == "0x864cfb"
 
     # Non-byte aligned lengths
     gal_bits = [1, 0] * 98  # 196 bits

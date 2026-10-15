@@ -115,6 +115,10 @@ def nav_stream_for(sysc, signal, eph, header, week, sow, duration_s,
                                         rx_lat=rx_lat, rx_lon=rx_lon,
                                         gps_prns=kwargs.get("gps_prns"))
         except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "sbas_iono.nav_stream başarısız oldu; eski sbas_encode geri dönüşüne düşülüyor"
+            )
             return sbas_encode.nav_stream(eph, week, sow, duration_s,
                                           eph_by_prn=eph_by_prn)
     return None

@@ -116,3 +116,48 @@ class TestViterbiPerformance:
         avg_ms = (t1 - t0) / n_iters * 1000.0
         # Typical execution is ~0.37 ms; assert well below 1.0 ms (legacy was 1.9 ms)
         assert avg_ms < 1.0, f"Viterbi decode took {avg_ms:.3f} ms (expected < 1.0 ms)"
+
+
+class TestSBASConvolutionalStandards:
+    def test_sbas_standard_impulse_response(self):
+        """RTCA DO-229 / ICAO Annex 10 standart darbe yanıtı (impulse response).
+        G1 = 171_8 = [1, 1, 1, 1, 0, 0, 1]
+        G2 = 133_8 = [1, 0, 1, 1, 0, 1, 1]
+        """
+        conv = sbas_enc._Conv()
+        coded = conv.encode([1, 0, 0, 0, 0, 0, 0])
+        g1_out = [coded[2 * i] for i in range(7)]
+        g2_out = [coded[2 * i + 1] for i in range(7)]
+        assert g1_out == [1, 1, 1, 1, 0, 0, 1]
+        assert g2_out == [1, 0, 1, 1, 0, 1, 1]
+
+    def test_sbas_independent_reference_equivalence(self):
+        """MSB=en-yeni konvansiyonuyla yazılmış bağımsız referans kodlayıcı ile denklik."""
+        import random
+
+        def ref_conv_encode(bits: list[int]) -> list[int]:
+            # MSB=en-yeni: history[0] en yeni giriş biti, 171_8 ve 133_8 muslukları
+            history = [0] * 7
+            g1_taps = [1, 1, 1, 1, 0, 0, 1]  # 0o171
+            g2_taps = [1, 0, 1, 1, 0, 1, 1]  # 0o133
+            out = []
+            for b in bits:
+                history = [int(b)] + history[:6]
+                g1 = sum(h * t for h, t in zip(history, g1_taps)) & 1
+                g2 = sum(h * t for h, t in zip(history, g2_taps)) & 1
+                out.extend([g1, g2])
+            return out
+
+        rng = random.Random(999)
+        data = [rng.randint(0, 1) for _ in range(200)]
+
+        conv = sbas_enc._Conv()
+        coded_conv = conv.encode(data)
+        coded_ref = ref_conv_encode(data)
+        assert coded_conv == coded_ref
+
+        # Viterbi kod çözücünün standart çıktıyı tam çözebildiğini doğrula
+        decoded = viterbi_free_decode(coded_conv, invert_g2=False)
+        assert decoded == data
+        decoded_viterbi = viterbi_decode(coded_conv, invert_g2=False, known_start_state=0)
+        assert decoded_viterbi == data

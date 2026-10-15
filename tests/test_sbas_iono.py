@@ -1,4 +1,5 @@
 """Tests for DO-229 SBAS Message Types 18 & 26 (Ionosphere) and IONEX processing."""
+import math
 import numpy as np
 import pytest
 
@@ -197,7 +198,7 @@ def test_sbas_nav_stream_generates_mt1_mt2_mt7_mt9_mt18_mt25_mt26(srec):
     for t9 in t9_blocks:
         parsed9 = sbas_decode.parse_type9(t9["data"])
         assert parsed9["urai"] == 0, f"GEO must be healthy (urai=0), got {parsed9['urai']}"
-        exp_x = srec["x_m"] * 1e-3 if srec["x_m"] > 1e8 else srec["x_m"]
+        exp_x = srec["x_m"]
         assert abs(parsed9["x_m"] - exp_x) < 0.1
 
 
@@ -248,5 +249,58 @@ def test_sbas_nav_stream_is_deterministic(srec):
     b, _ = sbas_iono.nav_stream(srec, 0, 561600.0, 6, rx_lat=41.0, rx_lon=29.0)
     assert np.array_equal(a, b)
     assert sorted(set(a.tolist())) == [-1, 1]
+
+
+def test_parsed_sbas_records_geo_orbit_magnitude():
+    """RINEX parse sonrası her S kaydının GEO yörünge büyüklüğünde (35000-45000 km) olduğunu doğrula."""
+    e = ephemeris.parse_rinex_multi("tests/fixtures/brdc_mixed.rnx", ("S",), require=())
+    s_recs = [v for k, v in e.items() if (k[0] if isinstance(k, tuple) else "S") == "S"]
+    assert len(s_recs) >= 3
+    for rec in s_recs:
+        r = math.hypot(rec["x_m"], rec["y_m"], rec["z_m"])
+        assert 3.5e7 < r < 4.5e7, f"SBAS PRN {rec.get('prn')} yörünge yarıçapı ({r/1e3:.1f} km) beklenen aralıkta değil"
+
+
+def test_align_epochs_sbas_toe_ref_16s_quantization(srec):
+    """align_epochs'un SBAS kayıtları için toe_ref'i 16 saniye ızgarasına oturttuğunu
+    ve encode_type9 -> decode sonrası tam eşleştiğini doğrula."""
+    for test_sow in (0.0, 15.0, 16.0, 43215.7, 561607.0):
+        aligned = ephemeris.align_epochs({120: srec}, week=2200, sow=test_sow)
+        s_aligned = aligned[120]
+        assert s_aligned["toe_ref"] % 16.0 == 0.0, f"toe_ref {s_aligned['toe_ref']} 16 saniyenin katı olmalı"
+
+        bits = sbas_iono.encode_type9(s_aligned, tow_s=test_sow)
+        parsed = sbas_decode.parse_type9(bits)
+        exp_t0 = s_aligned["toe_ref"] % 86400.0
+        assert abs(parsed["t0"] - exp_t0) < 1e-6
+
+
+def test_ionex_synthetic_periodic_day():
+    """Sentetik haritada get_vertical_delay_m(41, 29, 43200) ile get_vertical_delay_m(41, 29, 43200 + 3*86400)
+    tamamen aynı gecikmeyi vermeli (günlük periyodiklik)."""
+    imap = ionex.synthetic_ionex()
+    d1 = imap.get_vertical_delay_m(41.0, 29.0, 43200.0)
+    d2 = imap.get_vertical_delay_m(41.0, 29.0, 43200.0 + 3 * 86400.0)
+    assert abs(d1 - d2) < 1e-9
+
+
+def test_multiband_selection_and_schedule(srec):
+    """Alıcı (41, 29) için seçilen bandların {4, 5}'i içerdiği, num_bands == 2 olduğu
+    ve hem MT18 hem MT26'nın iki band için de üretildiği doğrulanmalıdır."""
+    bands = sbas_iono.find_bands_for_region(41.0, 29.0, lon_window_deg=25.0)
+    assert set(bands) == {4, 5}
+    assert len(bands) == 2
+
+    arr, _ = sbas_iono.nav_stream(srec, 0, 561600.0, 30, rx_lat=41.0, rx_lon=29.0)
+    blks = sbas_decode.decode_messages(arr)
+    mt18 = [sbas_decode.parse_type18(b["data"]) for b in blks if b["type"] == 18]
+    mt26 = [sbas_decode.parse_type26(b["data"]) for b in blks if b["type"] == 26]
+
+    assert len(mt18) >= 2
+    assert set(m["band"] for m in mt18) == {4, 5}
+    assert all(m["num_bands"] == 2 for m in mt18)
+
+    assert len(mt26) >= 2
+    assert set(m["band"] for m in mt26) == {4, 5}
 
 

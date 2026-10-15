@@ -1,7 +1,7 @@
 """CRC-24Q (polynomial 0x1864CFB) calculation and verification.
 
 Parity checksum used by GPS CNAV, Galileo I/NAV and F/NAV, SBAS L1, and RTCM.
-Augmented message format: MSB-first over data bits with 24 trailing zeros.
+Direct form CRC-24Q: MSB-first over data bits (M(x)*x^24 mod g(x)).
 Accelerated with precomputed 256-entry byte lookup table.
 """
 from __future__ import annotations
@@ -70,11 +70,8 @@ def crc24q(bits: Sequence[int] | np.ndarray) -> list[int]:
             reg ^= _CRC24Q
         reg &= 0xFFFFFF
 
-    # Apply 24 trailing zero shifts (equivalent to 3 zero bytes in table)
-    reg = ((reg << 8) & 0xFFFFFF) ^ _CRC24Q_TABLE[(reg >> 16) & 0xFF]
-    reg = ((reg << 8) & 0xFFFFFF) ^ _CRC24Q_TABLE[(reg >> 16) & 0xFF]
-    reg = ((reg << 8) & 0xFFFFFF) ^ _CRC24Q_TABLE[(reg >> 16) & 0xFF]
-
+    # Doğrudan form CRC-24Q zaten M(x)*x^24 mod g(x) hesaplamıştır;
+    # arkadan 24 sıfır kaydırmak standardı bozar, bu yüzden trailing shift uygulanmaz.
     return [(reg >> (23 - i)) & 1 for i in range(24)]
 
 

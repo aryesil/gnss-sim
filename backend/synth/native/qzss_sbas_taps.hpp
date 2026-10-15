@@ -15,6 +15,7 @@
 //
 // The values below are the G2 delay-chip column of those tables and match the
 // widely-used reference implementation (RTKLIB L1 C/A code-phase table).
+// Not: Bu değerler donanım musluğu (tap) değil, G2 kod aşaması gecikme çipleridir (G2 delay chips).
 #pragma once
 
 namespace {
