@@ -4,6 +4,60 @@ const _channels = {};   // id -> {lastOutdir, lastSatellites, trackFrames, txSlo
 
 window.channelState = function (id) { return _channels[id]; };
 
+function readSSEStream(response, onMessage, onFinished, onError) {
+  if (!response || !response.body) return;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  function pump() {
+    reader.read().then(({ value, done }) => {
+      if (done) {
+        if (buffer.trim()) {
+          parseSseBlock(buffer);
+          buffer = '';
+        }
+        if (onFinished) onFinished();
+        return;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split(/\r?\n\r?\n/);
+      buffer = parts.pop();
+      for (const part of parts) {
+        parseSseBlock(part);
+      }
+      pump();
+    }).catch(err => {
+      if (onError) onError(err);
+      else console.warn('SSE stream error:', err);
+    });
+  }
+
+  function parseSseBlock(block) {
+    const lines = block.split(/\r?\n/);
+    const dataLines = [];
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith(':')) {
+        continue;
+      }
+      if (line.startsWith('data:')) {
+        dataLines.push(line.slice(5).trim());
+      }
+    }
+    if (dataLines.length === 0) return;
+    const jsonStr = dataLines.join('\n');
+    try {
+      const msg = JSON.parse(jsonStr);
+      onMessage(msg);
+    } catch (e) {
+      console.warn('Failed to parse SSE payload:', e, jsonStr);
+    }
+  }
+
+  pump();
+}
+
 window.addChannel = function () {
   if (Object.keys(_channels).length >= 2) {
     alert('Max 2 channels (PlutoSDR TX1/TX2).');
@@ -597,21 +651,15 @@ function wireChannelActions(id) {
     logLine(`Channel ${id}: replaying "${name}"`, 'info');
     const r = await fetch(`/api/recording/replay?name=${encodeURIComponent(name)}&speed=1`);
     if (!r.ok) return alert('replay failed: HTTP ' + r.status);
-    const rd = r.body.getReader(), dec = new TextDecoder();
-    (function pump() {
-      rd.read().then(({ value, done }) => {
-        if (done) return;
-        dec.decode(value).split('\n\n').forEach(chunk => {
-          const line = chunk.replace(/^data: /, '').trim(); if (!line) return;
-          const msg = JSON.parse(line);
-          if (msg.spectrogram_db) pushSpectrogramColumn(`${id}-spectrogram`, msg.spectrogram_db);
-          if (msg.cn0_db !== undefined) pushCn0Sample(`${id}-cn0-trend`, msg.cn0_db);
-          if (msg.timeline_step) logLine(`Channel ${id} replay: ${JSON.stringify(msg.timeline_step)}`, 'info');
-          if (msg.finished) logLine(`Channel ${id}: replay "${name}" finished`, 'info');
-        });
-        pump();
-      }).catch(() => {});
-    })();
+    readSSEStream(
+      r,
+      (msg) => {
+        if (msg.spectrogram_db) pushSpectrogramColumn(`${id}-spectrogram`, msg.spectrogram_db);
+        if (msg.cn0_db !== undefined) pushCn0Sample(`${id}-cn0-trend`, msg.cn0_db);
+        if (msg.timeline_step) logLine(`Channel ${id} replay: ${JSON.stringify(msg.timeline_step)}`, 'info');
+        if (msg.finished) logLine(`Channel ${id}: replay "${name}" finished`, 'info');
+      }
+    );
   };
 
   document.getElementById(`${id}-scenario-save`).onclick = async () => {
@@ -1000,51 +1048,47 @@ function wireChannelActions(id) {
         });
         return;
       }
-      const rd = r.body.getReader(), dec = new TextDecoder();
-      (function pump() {
-        rd.read().then(({ value, done }) => {
-          if (done) return;
-          dec.decode(value).split('\n\n').forEach(chunk => {
-            const line = chunk.replace(/^data: /, '').trim(); if (!line) return;
-            const msg = JSON.parse(line);
-            if (msg.progress !== undefined)
-              document.getElementById(`${id}-gen-progress`).value = msg.progress;
-            if (msg.error) {
-              document.getElementById(`${id}-warnings`).textContent = 'error: ' + msg.error;
-              logLine('Channel ' + id + ': ' + msg.error, 'error');
+      readSSEStream(
+        r,
+        (msg) => {
+          if (msg.progress !== undefined)
+            document.getElementById(`${id}-gen-progress`).value = msg.progress;
+          if (msg.error) {
+            document.getElementById(`${id}-warnings`).textContent = 'error: ' + msg.error;
+            logLine('Channel ' + id + ': ' + msg.error, 'error');
+          }
+          if (msg.done) {
+            st.lastOutdir = msg.done.outdir;
+            document.getElementById(`${id}-gen-progress`).value = 1;
+            const dw = msg.done.warnings || [];
+            document.getElementById(`${id}-warnings`).textContent = dw.join('\n');
+            dw.forEach(w => logLine('Channel ' + id + ': ' + w, 'warn'));
+            drawInspectTable(`${id}-inspect-table`, msg.done.inspect);
+            drawSvPowerTable(`${id}-svpower-table`, msg.done.svs, msg.done.bands);
+            const corrLabel = document.getElementById(`${id}-iq-correlation-label`);
+            const gpsOnlyInspect = !!(msg.done.inspect && msg.done.inspect.length);
+            if (corrLabel) {
+              corrLabel.textContent = gpsOnlyInspect
+                ? 'Acquisition metric (dB)'
+                : 'Per-SV signal power (gain + channel, dB)';
             }
-            if (msg.done) {
-              st.lastOutdir = msg.done.outdir;
-              document.getElementById(`${id}-gen-progress`).value = 1;
-              const dw = msg.done.warnings || [];
-              document.getElementById(`${id}-warnings`).textContent = dw.join('\n');
-              dw.forEach(w => logLine('Channel ' + id + ': ' + w, 'warn'));
-              drawInspectTable(`${id}-inspect-table`, msg.done.inspect);
-              drawSvPowerTable(`${id}-svpower-table`, msg.done.svs, msg.done.bands);
-              const corrLabel = document.getElementById(`${id}-iq-correlation-label`);
-              const gpsOnlyInspect = !!(msg.done.inspect && msg.done.inspect.length);
-              if (corrLabel) {
-                corrLabel.textContent = gpsOnlyInspect
-                  ? 'Acquisition metric (dB)'
-                  : 'Per-SV signal power (gain + channel, dB)';
-              }
-              // Multi-GNSS: let the scrubber drive the power bars (fading vs t).
-              setSvPowerModel(id, gpsOnlyInspect ? null : msg.done.svs, msg.done.fading);
-              drawCorrelationBars(`${id}-iq-correlation`, msg.done.inspect, msg.done.svs, 0);
-              loadIqPlots(id, msg.done.outdir);
-              attachIqScrubber(id, msg.done.outdir);
-              if (st.lastSatellites) {
-                const cn0 = {};
-                (msg.done.inspect || []).forEach(r => { cn0[r.prn] = r.metric_db; });
-                drawSkyplot(`${id}-skyplot`, st.lastSatellites, cn0);
-              }
+            // Multi-GNSS: let the scrubber drive the power bars (fading vs t).
+            setSvPowerModel(id, gpsOnlyInspect ? null : msg.done.svs, msg.done.fading);
+            drawCorrelationBars(`${id}-iq-correlation`, msg.done.inspect, msg.done.svs, 0);
+            loadIqPlots(id, msg.done.outdir);
+            attachIqScrubber(id, msg.done.outdir);
+            if (st.lastSatellites) {
+              const cn0 = {};
+              (msg.done.inspect || []).forEach(r => { cn0[r.prn] = r.metric_db; });
+              drawSkyplot(`${id}-skyplot`, st.lastSatellites, cn0);
             }
-          });
-          pump();
-        }).catch(() => {
+          }
+        },
+        null,
+        () => {
           logLine('Channel ' + id + ' generate stream error', 'error');
-        });
-      })();
+        }
+      );
     });
   };
 
@@ -1102,37 +1146,49 @@ function wireChannelActions(id) {
     }
     badge.textContent = 'TRANSMITTING'; badge.classList.add('badge-live');
     logLine(`Channel ${id}: transmitting generated file (${st.lastOutdir})`, 'info');
-    const rd = r.body.getReader(), dec = new TextDecoder();
-    (function pump() {
-      rd.read().then(({ value, done }) => {
-        if (done) return;
-        dec.decode(value).split('\n\n').forEach(chunk => {
-          const line = chunk.replace(/^data: /, '').trim(); if (!line) return;
-          const msg = JSON.parse(line);
-          if (msg.slot) {
-            channelState(id).txSlot = msg.slot;
-            enableLiveTabs(id, msg.slot);
+    readSSEStream(
+      r,
+      (msg) => {
+        if (msg.slot) {
+          channelState(id).txSlot = msg.slot;
+          enableLiveTabs(id, msg.slot);
+        }
+        if (msg.fraction !== undefined && msg.fraction !== null) {
+          const p = document.getElementById(`${id}-gen-progress`);
+          if (p) p.value = msg.fraction;
+        }
+        if (msg.finished) {
+          badge.textContent = 'STOPPED'; badge.classList.remove('badge-live'); disableLiveTabs(id);
+          logLine(`Channel ${id}: file transmit finished`, 'info');
+        }
+        if (msg.error) {
+          badge.textContent = 'STOPPED'; badge.classList.remove('badge-live'); disableLiveTabs(id);
+          logLine(`Channel ${id} error: ${msg.error}`, 'error');
+          alert(`Transmit error: ${msg.error}`);
+        }
+      },
+      () => {
+        if (badge.textContent === 'TRANSMITTING') {
+          badge.textContent = 'STOPPED'; badge.classList.remove('badge-live'); disableLiveTabs(id);
+        }
+      },
+      async (err) => {
+        console.warn(`Channel ${id} transmit stream interrupted:`, err);
+        try {
+          const res = await fetch('/api/live/status');
+          if (res.ok) {
+            const slots = await res.json();
+            const currentSlot = channelState(id).txSlot;
+            if (currentSlot && slots[currentSlot] && slots[currentSlot].active) {
+              logLine(`Channel ${id}: stream connection interrupted, SDR still transmitting on ${currentSlot}`, 'warn');
+              return;
+            }
           }
-          if (msg.fraction !== undefined && msg.fraction !== null) {
-            const p = document.getElementById(`${id}-gen-progress`);
-            if (p) p.value = msg.fraction;
-          }
-          if (msg.finished) {
-            badge.textContent = 'STOPPED'; badge.classList.remove('badge-live'); disableLiveTabs(id);
-            logLine(`Channel ${id}: file transmit finished`, 'info');
-          }
-          if (msg.error) {
-            badge.textContent = 'STOPPED'; badge.classList.remove('badge-live'); disableLiveTabs(id);
-            logLine(`Channel ${id} error: ${msg.error}`, 'error');
-            alert(`Transmit error: ${msg.error}`);
-          }
-        });
-        pump();
-      }).catch(() => {
+        } catch (_) {}
         badge.textContent = 'STOPPED'; badge.classList.remove('badge-live');
         disableLiveTabs(id);
-      });
-    })();
+      }
+    );
   };
 
   document.getElementById(`${id}-btn-start-now`).onclick = async () => {
@@ -1200,28 +1256,46 @@ function wireChannelActions(id) {
       return;
     }
     badge.textContent = 'LIVE'; badge.classList.add('badge-live');
-    const rd = r.body.getReader(), dec = new TextDecoder();
-    (function pump() {
-      rd.read().then(({ value, done }) => {
-        if (done) return;
-        dec.decode(value).split('\n\n').forEach(chunk => {
-          const line = chunk.replace(/^data: /, '').trim(); if (!line) return;
-          const msg = JSON.parse(line);
-          if (msg.slot && !channelState(id).txSlot) enableLiveTabs(id, msg.slot);
-          if (msg.spectrogram_db) pushSpectrogramColumn(`${id}-spectrogram`, msg.spectrogram_db);
-          if (msg.cn0_db !== undefined) pushCn0Sample(`${id}-cn0-trend`, msg.cn0_db);
-          if (msg.timeline_step) logLine(`Channel ${id} timeline: ${JSON.stringify(msg.timeline_step)}`, 'info');
-          if (msg.finished) {
-            badge.textContent = 'STOPPED'; badge.classList.remove('badge-live'); disableLiveTabs(id);
-            if (document.getElementById(`${id}-record`).checked) _refreshReplayOptions();
+    readSSEStream(
+      r,
+      (msg) => {
+        if (msg.slot && !channelState(id).txSlot) enableLiveTabs(id, msg.slot);
+        if (msg.spectrogram_db) pushSpectrogramColumn(`${id}-spectrogram`, msg.spectrogram_db);
+        if (msg.cn0_db !== undefined) pushCn0Sample(`${id}-cn0-trend`, msg.cn0_db);
+        if (msg.timeline_step) logLine(`Channel ${id} timeline: ${JSON.stringify(msg.timeline_step)}`, 'info');
+        if (msg.finished) {
+          badge.textContent = 'STOPPED'; badge.classList.remove('badge-live'); disableLiveTabs(id);
+          if (document.getElementById(`${id}-record`).checked) _refreshReplayOptions();
+        }
+        if (msg.error) {
+          badge.textContent = 'STOPPED'; badge.classList.remove('badge-live'); disableLiveTabs(id);
+          logLine(`Channel ${id} error: ${msg.error}`, 'error');
+          alert(`Live stream error: ${msg.error}`);
+        }
+      },
+      () => {
+        if (badge.textContent === 'LIVE') {
+          badge.textContent = 'STOPPED'; badge.classList.remove('badge-live'); disableLiveTabs(id);
+          if (document.getElementById(`${id}-record`).checked) _refreshReplayOptions();
+        }
+      },
+      async (err) => {
+        console.warn(`Channel ${id} live stream interrupted:`, err);
+        try {
+          const res = await fetch('/api/live/status');
+          if (res.ok) {
+            const slots = await res.json();
+            const currentSlot = channelState(id).txSlot;
+            if (currentSlot && slots[currentSlot] && slots[currentSlot].active) {
+              logLine(`Channel ${id}: stream connection interrupted, SDR still broadcasting on ${currentSlot}`, 'warn');
+              return;
+            }
           }
-        });
-        pump();
-      }).catch(() => {
+        } catch (_) {}
         badge.textContent = 'STOPPED'; badge.classList.remove('badge-live');
         disableLiveTabs(id);
-      });
-    })();
+      }
+    );
   };
 
   document.getElementById(`${id}-stop`).onclick = () => {

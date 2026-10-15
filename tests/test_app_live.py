@@ -593,3 +593,12 @@ def test_live_start_now_runs_on_current_time_plus_lead(monkeypatch):
     assert r.status_code == 200
     lead = (seen["start"] - t0).total_seconds()
     assert config.LIVE_START_LEAD_S - 0.5 < lead < config.LIVE_START_LEAD_S + 5.0
+
+
+def test_live_status_reports_slot_state():
+    r = client.get("/api/live/status")
+    assert r.status_code == 200
+    data = r.json()
+    assert "TX1" in data and "TX2" in data
+    assert isinstance(data["TX1"]["active"], bool)
+    assert isinstance(data["TX1"]["has_session"], bool)
