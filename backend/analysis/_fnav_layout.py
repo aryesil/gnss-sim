@@ -45,7 +45,7 @@ LAYOUT: dict[int, list[tuple[str, str, float, int]]] = {
         ("af0",       "s", _2 ** -34, 31),
         ("af1",       "s", _2 ** -46, 21),
         ("af2",       "s", _2 ** -59,  6),
-        ("_reserved", "u", 0.0,        8),   # SISA
+        ("sisa",      "u", 1.0,        8),   # SISA(E1,E5a) indeksi (Galileo ICD Tablo 57 / Tablo 89)
         ("_reserved", "u", 0.0,       11),   # ai0 (iono NeQuick)
         ("_reserved", "u", 0.0,       11),   # ai1
         ("_reserved", "u", 0.0,       14),   # ai2

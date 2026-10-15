@@ -67,6 +67,17 @@ def test_word_fields_round_trip_clean(erec):
     assert sqrta == pytest.approx(erec["sqrtA"], abs=1e-3)
 
 
+def test_word1_sisa_field(erec):
+    """Galileo ICD Tablo 57: F/NAV Word 1 içinde SISA indeksi."""
+    page = F.build_page(1, erec, erec["prn"], int(_SOW), 1325)
+    wt, message = F.decode_word(page)
+    assert wt == 1
+    # word 1: type(6) prn(6) iodnav(10) toc(14) af0(31) af1(21) af2(6) sisa(8)
+    off = 6 + 6 + 10 + 14 + 31 + 21 + 6
+    sisa_val = _u(message[off:off + 8])
+    assert sisa_val == F.sisa_index(erec.get("sisa"))
+
+
 def test_nav_stream_rate_and_alphabet(erec):
     arr, rate = F.nav_stream(erec, erec["prn"], 1325, _SOW, 6)
     assert rate == 50.0
