@@ -80,9 +80,171 @@ def decode_block(bits: list[int]) -> dict[str, Any] | None:
         "crc_ok": crc_ok,
         "data": data,
     }
-    if mtype == 9 and crc_ok:
-        out.update(parse_type9(data))
+    if crc_ok:
+        if mtype == 1:
+            out.update(parse_type1(data))
+        elif mtype == 2:
+            out.update(parse_type2(data))
+        elif mtype == 7:
+            out.update(parse_type7(data))
+        elif mtype == 9:
+            out.update(parse_type9(data))
+        elif mtype == 18:
+            out.update(parse_type18(data))
+        elif mtype == 25:
+            out.update(parse_type25(data))
+        elif mtype == 26:
+            out.update(parse_type26(data))
     return out
+
+
+def parse_type1(data_bits: list[int]) -> dict[str, Any]:
+    """Parse Message Type 1 (PRN Mask) 212-bit data field."""
+    mask = list(data_bits[:210])
+    iodp = _u(data_bits, 210, 2)
+    active_gps_prns = [i for i in range(1, 38) if mask[i - 1] == 1]
+    return {
+        "mask": mask,
+        "iodp": iodp,
+        "active_gps_prns": active_gps_prns,
+    }
+
+
+def parse_type2(data_bits: list[int]) -> dict[str, Any]:
+    """Parse Message Type 2 (Fast Corrections) 212-bit data field."""
+    iodf = _u(data_bits, 0, 2)
+    iodp = _u(data_bits, 2, 2)
+    prc_list = []
+    udre_list = []
+    for i in range(13):
+        raw_prc = _s(data_bits, 4 + i * 12, 12)
+        prc_m = float(raw_prc) * 0.125
+        udre = _u(data_bits, 160 + i * 4, 4)
+        prc_list.append(prc_m)
+        udre_list.append(udre)
+    return {
+        "iodf": iodf,
+        "iodp": iodp,
+        "prc_m": prc_list,
+        "udre": udre_list,
+    }
+
+
+def parse_type7(data_bits: list[int]) -> dict[str, Any]:
+    """Parse Message Type 7 (Fast Correction Degradation Factor) 212-bit data field."""
+    t_lat = _u(data_bits, 0, 4)
+    iodp = _u(data_bits, 4, 2)
+    ai_list = [_u(data_bits, 8 + i * 4, 4) for i in range(51)]
+    return {
+        "t_lat": t_lat,
+        "iodp": iodp,
+        "ai_list": ai_list,
+    }
+
+
+def parse_type18(data_bits: list[int]) -> dict[str, Any]:
+    """Parse Message Type 18 (Ionospheric Grid Point Mask) 212-bit data field."""
+    num_bands = _u(data_bits, 0, 4)
+    band = _u(data_bits, 4, 4)
+    iodi = _u(data_bits, 8, 2)
+    mask = list(data_bits[10:211])
+    active_igps = [idx for idx, bit in enumerate(mask) if bit == 1]
+    return {
+        "num_bands": num_bands,
+        "band": band,
+        "iodi": iodi,
+        "mask": mask,
+        "active_igps": active_igps,
+    }
+
+
+def parse_type26(data_bits: list[int]) -> dict[str, Any]:
+    """Parse Message Type 26 (Ionospheric Delay Corrections) 212-bit data field."""
+    band = _u(data_bits, 0, 4)
+    block_id = _u(data_bits, 4, 4)
+    igps = []
+    for i in range(15):
+        bit_off = 8 + i * 13
+        raw_delay = _u(data_bits, bit_off, 9)
+        givei = _u(data_bits, bit_off + 9, 4)
+        delay_m = None if raw_delay == 0x1FF else float(raw_delay) * 0.125
+        igps.append({"delay_m": delay_m, "givei": givei})
+    iodi = _u(data_bits, 203, 2)
+    return {
+        "band": band,
+        "block_id": block_id,
+        "iodi": iodi,
+        "igps": igps,
+    }
+
+
+def parse_type25(data_bits: list[int]) -> dict[str, Any]:
+    """Parse Message Type 25 (Long-Term Satellite Error Corrections) 212-bit data field."""
+    half0 = list(data_bits[:106])
+    half1 = list(data_bits[106:212])
+
+    def _parse_half(h: list[int]) -> dict[str, Any]:
+        vel_code = _u(h, 0, 1)
+        if vel_code == 0:
+            iodp = _u(h, 103, 2)
+            sats = []
+            for bit_start in (1, 52):
+                prn_idx = _u(h, bit_start, 6)
+                if prn_idx > 0:
+                    iode = _u(h, bit_start + 6, 8)
+                    dx = float(_s(h, bit_start + 14, 9)) * 0.125
+                    dy = float(_s(h, bit_start + 23, 9)) * 0.125
+                    dz = float(_s(h, bit_start + 32, 9)) * 0.125
+                    daf0 = float(_s(h, bit_start + 41, 10)) * (2.0 ** -31)
+                    sats.append({
+                        "prn_mask_idx": prn_idx,
+                        "iode": iode,
+                        "dx_m": dx,
+                        "dy_m": dy,
+                        "dz_m": dz,
+                        "daf0_s": daf0,
+                    })
+            return {"vel_code": 0, "iodp": iodp, "sats": sats}
+        else:
+            iodp = _u(h, 104, 2)
+            prn_idx = _u(h, 1, 6)
+            iode = _u(h, 7, 8)
+            dx = float(_s(h, 15, 11)) * 0.125
+            dy = float(_s(h, 26, 11)) * 0.125
+            dz = float(_s(h, 37, 11)) * 0.125
+            daf0 = float(_s(h, 48, 11)) * (2.0 ** -31)
+            dx_dot = float(_s(h, 59, 8)) * (2.0 ** -11)
+            dy_dot = float(_s(h, 67, 8)) * (2.0 ** -11)
+            dz_dot = float(_s(h, 75, 8)) * (2.0 ** -11)
+            daf1 = float(_s(h, 83, 8)) * (2.0 ** -39)
+            t_lt = float(_u(h, 91, 13)) * 16.0
+            return {
+                "vel_code": 1,
+                "iodp": iodp,
+                "sats": [{
+                    "prn_mask_idx": prn_idx,
+                    "iode": iode,
+                    "dx_m": dx,
+                    "dy_m": dy,
+                    "dz_m": dz,
+                    "daf0_s": daf0,
+                    "dx_dot": dx_dot,
+                    "dy_dot": dy_dot,
+                    "dz_dot": dz_dot,
+                    "daf1": daf1,
+                    "t_lt": t_lt,
+                }] if prn_idx > 0 else []
+            }
+
+    h0_res = _parse_half(half0)
+    h1_res = _parse_half(half1)
+    all_sats = h0_res["sats"] + h1_res["sats"]
+    return {
+        "halves": [h0_res, h1_res],
+        "sats": all_sats,
+        "iodp": h0_res["iodp"],
+    }
+
 
 
 def parse_type9(data_bits: list[int]) -> dict[str, Any]:

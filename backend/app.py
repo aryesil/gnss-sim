@@ -1195,6 +1195,11 @@ def start_transmit(body: dict, request: Request):
         else:
             raise HTTPException(400, "either 'outdir' or 'iq_path' is required")
 
+        if not sample_rate:
+            sample_rate = 2600000.0
+        if not body.get("sample_format"):
+            body["sample_format"] = "int16"
+
         lo_hz, bb_offset_hz, rf_report = _resolve_rf_plan(body, config.L1_HZ, sample_rate)
         params = transmit.TxParams(
             iq_path=iq_path,
@@ -1614,6 +1619,9 @@ def live_start(body: dict, request: Request):
                     audit.log_event("auto_stop_timeout", slot=slot, max_duration_s=max_duration_s)
                     break
                 th.join(timeout=0.2)
+            _tx_slots[slot]["stop"].set()
+            if session:
+                session.stop()
             th.join(timeout=2.0)
             while q:                      # events queued after the loop broke
                 yield emit({**q.pop(0), "slot": slot})
@@ -1622,6 +1630,8 @@ def live_start(body: dict, request: Request):
             # event (auto-stop, early cancel) must still report it
             yield emit({"finished": True, **(rf_report or {}), "slot": slot})
         finally:
+            if session:
+                session.stop()
             if recorder is not None:
                 recorder.close()
                 audit.log_event("recording_saved", slot=slot, name=recorder.name)
