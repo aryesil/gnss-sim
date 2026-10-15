@@ -11,10 +11,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from backend import geometry, inspector, scenario
+from backend import config, geometry, inspector, scenario
 from backend.synth import signal_engine
 
-_PREFETCH = 2   # segments generated ahead of the TX stream
+_PREFETCH = 6   # segments generated ahead of the TX stream (in-memory ring buffer)
 # Live ephemeris is re-pinned every 15 min of session time. Each pin picks
 # every satellite's record nearest it and keeps real records untouched, so a
 # pin only changes a satellite when a newer record is nearer: GPS (2 h
@@ -84,7 +84,8 @@ def _generate_segment(seg_req, iq_filename):
         return (inspector.read_iq(outdir / iq_filename, seg_req.sample_format),
                 iq_filename)
     finally:
-        shutil.rmtree(outdir, ignore_errors=True)
+        if getattr(seg_req, "outdir", None) is None:
+            shutil.rmtree(outdir, ignore_errors=True)
 
 
 @dataclass
@@ -103,6 +104,8 @@ class LiveSession:
         self.consecutive_errors = 0
         self._iq_filename: str | None = None   # resolved from the first segment
         self._pool = None
+        self._scratch_dir = config.OUT_DIR / f".live_{id(self)}_{int(dt.datetime.now().timestamp())}"
+        self._scratch_dir.mkdir(parents=True, exist_ok=True)
 
     def jog(self, direction: str, distance_m: float) -> None:
         if direction not in _ENU_DIRECTIONS:
@@ -141,7 +144,9 @@ class LiveSession:
             base, lat=snap.llh[0], lon=snap.llh[1], alt=snap.llh[2],
             start=base.start + dt.timedelta(seconds=t),
             duration_s=seg, route=None, engine="native",
-            eph_epoch=base.start + dt.timedelta(seconds=block))
+            eph_epoch=base.start + dt.timedelta(seconds=block),
+            outdir=getattr(self, "_scratch_dir", None),
+            skip_meta=True)
 
     def _make_segment(self, k: int, snap: LiveState):
         """Segment ``k`` of the session: GPS time base.start + k*seg (+ the
@@ -228,9 +233,13 @@ class LiveSession:
             self.running = False
             if self._pool is not None:
                 self._pool.shutdown(wait=False, cancel_futures=True)
+            if hasattr(self, "_scratch_dir") and self._scratch_dir.exists():
+                shutil.rmtree(self._scratch_dir, ignore_errors=True)
 
     def stop(self) -> None:
         self.running = False
+        if hasattr(self, "_scratch_dir") and self._scratch_dir.exists():
+            shutil.rmtree(self._scratch_dir, ignore_errors=True)
 
     def snapshot(self) -> dict:
         """Current segment anchor: receiver ECEF and the GPS-time-of-week

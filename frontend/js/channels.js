@@ -19,7 +19,8 @@ window.addChannel = function () {
     <div class="channel-header">
       <strong id="${id}-title">GPS L1 C/A — Channel ${_channelCount}</strong>
       <span class="badge" id="${id}-badge">STOPPED</span>
-      <button id="${id}-start" class="btn-danger">Start</button>
+      <button id="${id}-start" class="btn-danger" title="Transmit generated scenario file to SDR">Start</button>
+      <button id="${id}-btn-start-now" class="btn-warning" title="Direct in-memory live stream to SDR (real-time, zero disk wait)">Start Now</button>
       <button id="${id}-stop">Stop</button>
       <button id="${id}-remove">Remove</button>
     </div>
@@ -1052,6 +1053,10 @@ function wireChannelActions(id) {
   document.getElementById(`${id}-start`).onclick = async () => {
     const ll = st.map.latlng();
     if (!ll) return alert('click the map to set a start position first');
+    if (!st.lastOutdir) {
+      alert("Önce 'Generate' tuşu ile senaryo dosyasını üretin veya doğrudan canlı yayın için 'Start Now' tuşunu kullanın.\n(Please click 'Generate' first to produce a scenario file, or click 'Start Now' for direct live transmission).");
+      return;
+    }
     if (!document.getElementById(`${id}-tx-confirm`).checked) {
       openConfirmModal(() => {
         document.getElementById(`${id}-tx-confirm`).checked = true;
@@ -1062,76 +1067,86 @@ function wireChannelActions(id) {
 
     const badge = document.getElementById(`${id}-badge`);
 
-    // Intelligent Start: If an IQ run has already been generated, transmit that file directly!
-    // This gives rock-solid, 100% constant DMA streaming with zero CPU live-synthesis overhead.
-    if (st.lastOutdir) {
-      const fileBody = {
-        outdir: st.lastOutdir,
-        sample_rate: _rateValue() || 2600000,
-        sample_format: document.getElementById(`${id}-fmt`).value || 'int16',
-        uri: document.getElementById(`${id}-uri`).value,
-        kind: document.getElementById(`${id}-kind`).value,
-        lo_hz: Number(document.getElementById(`${id}-lo`).value),
-        tx_gain_db: Number(document.getElementById(`${id}-gain`).value),
-        slot: document.getElementById(`${id}-tx-slot`).value,
-        confirm_isolated: document.getElementById(`${id}-tx-confirm`).checked,
-        dry_run: document.getElementById(`${id}-tx-dryrun`).checked,
-      };
-      const r = await fetch('/api/transmit', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fileBody),
-      });
-      if (r.status === 403) { alert('Set ALLOW_TX and tick the isolated-setup confirmation.'); return; }
-      if (r.status === 409) {
-        let detail = 'both TX1 and TX2 are already transmitting';
-        try { const d = await r.json(); detail = d.detail || detail; } catch (e) {}
-        alert(detail);
-        return;
-      }
-      if (!r.ok) {
-        let detail;
-        try { const d = await r.json(); detail = d.detail || JSON.stringify(d); }
-        catch (e) { detail = 'HTTP ' + r.status; }
-        const msg = 'Channel ' + id + ' transmit failed: ' + detail;
-        document.getElementById(`${id}-warnings`).textContent = msg;
-        if (window.logLine) logLine(msg, 'error');
-        alert(msg);
-        return;
-      }
-      badge.textContent = 'TRANSMITTING'; badge.classList.add('badge-live');
-      logLine(`Channel ${id}: transmitting generated file (${st.lastOutdir})`, 'info');
-      const rd = r.body.getReader(), dec = new TextDecoder();
-      (function pump() {
-        rd.read().then(({ value, done }) => {
-          if (done) return;
-          dec.decode(value).split('\n\n').forEach(chunk => {
-            const line = chunk.replace(/^data: /, '').trim(); if (!line) return;
-            const msg = JSON.parse(line);
-            if (msg.slot) {
-              channelState(id).txSlot = msg.slot;
-              enableLiveTabs(id, msg.slot);
-            }
-            if (msg.fraction !== undefined && msg.fraction !== null) {
-              const p = document.getElementById(`${id}-gen-progress`);
-              if (p) p.value = msg.fraction;
-            }
-            if (msg.finished) {
-              badge.textContent = 'STOPPED'; badge.classList.remove('badge-live'); disableLiveTabs(id);
-              logLine(`Channel ${id}: file transmit finished`, 'info');
-            }
-            if (msg.error) {
-              badge.textContent = 'STOPPED'; badge.classList.remove('badge-live'); disableLiveTabs(id);
-              logLine(`Channel ${id} error: ${msg.error}`, 'error');
-              alert(`Transmit error: ${msg.error}`);
-            }
-          });
-          pump();
-        }).catch(() => {
-          badge.textContent = 'STOPPED'; badge.classList.remove('badge-live');
-          disableLiveTabs(id);
-        });
-      })();
+    // File Transmit: transmits the generated file directly via DMA streaming
+    const fileBody = {
+      outdir: st.lastOutdir,
+      sample_rate: _rateValue() || 2600000,
+      sample_format: document.getElementById(`${id}-fmt`).value || 'int16',
+      uri: document.getElementById(`${id}-uri`).value,
+      kind: document.getElementById(`${id}-kind`).value,
+      lo_hz: Number(document.getElementById(`${id}-lo`).value),
+      tx_gain_db: Number(document.getElementById(`${id}-gain`).value),
+      slot: document.getElementById(`${id}-tx-slot`).value,
+      confirm_isolated: document.getElementById(`${id}-tx-confirm`).checked,
+      dry_run: document.getElementById(`${id}-tx-dryrun`).checked,
+    };
+    const r = await fetch('/api/transmit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fileBody),
+    });
+    if (r.status === 403) { alert('Set ALLOW_TX and tick the isolated-setup confirmation.'); return; }
+    if (r.status === 409) {
+      let detail = 'both TX1 and TX2 are already transmitting';
+      try { const d = await r.json(); detail = d.detail || detail; } catch (e) {}
+      alert(detail);
       return;
     }
+    if (!r.ok) {
+      let detail;
+      try { const d = await r.json(); detail = d.detail || JSON.stringify(d); }
+      catch (e) { detail = 'HTTP ' + r.status; }
+      const msg = 'Channel ' + id + ' transmit failed: ' + detail;
+      document.getElementById(`${id}-warnings`).textContent = msg;
+      if (window.logLine) logLine(msg, 'error');
+      alert(msg);
+      return;
+    }
+    badge.textContent = 'TRANSMITTING'; badge.classList.add('badge-live');
+    logLine(`Channel ${id}: transmitting generated file (${st.lastOutdir})`, 'info');
+    const rd = r.body.getReader(), dec = new TextDecoder();
+    (function pump() {
+      rd.read().then(({ value, done }) => {
+        if (done) return;
+        dec.decode(value).split('\n\n').forEach(chunk => {
+          const line = chunk.replace(/^data: /, '').trim(); if (!line) return;
+          const msg = JSON.parse(line);
+          if (msg.slot) {
+            channelState(id).txSlot = msg.slot;
+            enableLiveTabs(id, msg.slot);
+          }
+          if (msg.fraction !== undefined && msg.fraction !== null) {
+            const p = document.getElementById(`${id}-gen-progress`);
+            if (p) p.value = msg.fraction;
+          }
+          if (msg.finished) {
+            badge.textContent = 'STOPPED'; badge.classList.remove('badge-live'); disableLiveTabs(id);
+            logLine(`Channel ${id}: file transmit finished`, 'info');
+          }
+          if (msg.error) {
+            badge.textContent = 'STOPPED'; badge.classList.remove('badge-live'); disableLiveTabs(id);
+            logLine(`Channel ${id} error: ${msg.error}`, 'error');
+            alert(`Transmit error: ${msg.error}`);
+          }
+        });
+        pump();
+      }).catch(() => {
+        badge.textContent = 'STOPPED'; badge.classList.remove('badge-live');
+        disableLiveTabs(id);
+      });
+    })();
+  };
+
+  document.getElementById(`${id}-btn-start-now`).onclick = async () => {
+    const ll = st.map.latlng();
+    if (!ll) return alert('click the map to set a start position first');
+    if (!document.getElementById(`${id}-tx-confirm`).checked) {
+      openConfirmModal(() => {
+        document.getElementById(`${id}-tx-confirm`).checked = true;
+        document.getElementById(`${id}-btn-start-now`).click();
+      });
+      return;
+    }
+
+    const badge = document.getElementById(`${id}-badge`);
 
     const body = {
       rinex_path: document.getElementById(`${id}-rinex-path`).value.trim() || 'AUTO',
@@ -1149,9 +1164,6 @@ function wireChannelActions(id) {
       confirm_isolated: document.getElementById(`${id}-tx-confirm`).checked,
       dry_run: document.getElementById(`${id}-tx-dryrun`).checked,
     };
-    // The reported bug: engine/systems/bands were never sent to Start at
-    // all (only Generate merged _engineBody() in) -- Start always
-    // transmitted GPS L1 C/A regardless of what the panel showed checked.
     const _eng = _engineBody();
     Object.assign(body, _eng || {});
     const prnInput = document.getElementById(`${id}-lnav-prn`);
@@ -1165,25 +1177,19 @@ function wireChannelActions(id) {
     }
     if (st.timeline.length) body.timeline = st.timeline;
     if (document.getElementById(`${id}-record`).checked) body.record = true;
+
+    logLine(`Channel ${id}: starting live in-memory stream (Start Now)`, 'info');
     const r = await fetch('/api/live/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
     if (r.status === 403) { alert('Set ALLOW_TX and tick the isolated-setup confirmation.'); return; }
     if (r.status === 409) {
-      // Either both ports are occupied (Auto), or this channel's explicit
-      // TX1/TX2 pick is already running something else -- the backend's
-      // detail text tells the two apart, so surface it rather than a
-      // single canned "both occupied" message that would mislead the
-      // explicit-slot case.
       let detail = 'both TX1 and TX2 are already transmitting';
       try { const d = await r.json(); detail = d.detail || detail; } catch (e) { /* keep default */ }
       alert(detail);
       return;
     }
     if (!r.ok) {
-      // Anything else (validation 400, 503 EphemerisUnavailable, 5xx) never
-      // produces an SSE stream, so the badge must NOT go to 'On Air' -- it
-      // would stay there forever with no 'finished' message to clear it.
       let detail;
       try { const d = await r.json(); detail = d.detail || JSON.stringify(d); }
       catch (e) { detail = 'HTTP ' + r.status; }
