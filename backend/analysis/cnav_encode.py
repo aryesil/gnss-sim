@@ -18,8 +18,10 @@ from backend.analysis import _cnav_layout as L
 from backend.analysis._crc import crc24q
 
 _PREAMBLE = [1, 0, 0, 0, 1, 0, 1, 1]        # 0x8B
-_G1 = 0o171
-_G2 = 0o133
+# IS-GPS-200 Bölüm 30.3.2 / IS-GPS-705 Bölüm 20.3.2: G1=0o171, G2=0o133 (G2 terslenir).
+# Koddaki ((reg << 1) | b) yazmacında en yeni bit LSB'de olduğundan 7-bit zaman tersi kullanılır.
+_G1 = 0o117
+_G2 = 0o155
 _SEMI = 1.0 / math.pi                        # radians -> semicircles
 
 
