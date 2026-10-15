@@ -155,3 +155,31 @@ def test_frac_delay_handles_advance_and_delay():
     assert d[0] == 0 and d[2] == 0 and d[5] == 3
     a = generator._frac_delay(x, -2.0)
     assert a[0] == 2 and a[6] == 8 and a[8] == 0
+
+
+def test_generator_cancellation_cleans_up_outdir(tmp_path, monkeypatch):
+    monkeypatch.setattr(generator.config, "OUT_DIR", tmp_path)
+    p = tmp_path / "slow_sim.py"
+    p.write_text(textwrap.dedent('''
+        import sys, time
+        out = sys.argv[sys.argv.index("-o") + 1]
+        for t in range(50):
+            print(f"Time into run = {t}", flush=True)
+            time.sleep(0.05)
+        open(out, "wb").write(b"\\x00" * 100)
+    '''))
+    fake = launcher_for(p)
+    req = scenario.ScenarioRequest(
+        rinex_path=str(_FIX), lat=41.0, lon=29.0, alt=100.0,
+        start=dt.datetime(2026, 9, 3, 6, 0, 0), duration_s=100)
+
+    def on_progress(frac):
+        generator.stop_active_generation()
+
+    with pytest.raises(generator.GeneratorCancelled):
+        generator.run(req, progress_cb=on_progress, binary=fake)
+
+    # All generated subdirectories in tmp_path should have been cleaned up
+    subdirs = [d for d in tmp_path.iterdir() if d.is_dir()]
+    assert len(subdirs) == 0
+

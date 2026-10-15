@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 _PARITY_MASKS = [
-    0b111011000111110011010010000000,
-    0b011101100011111001101001000000,
-    0b101110110001111100110100000000,
-    0b010111011000111110011010000000,
-    0b101011101100011111001101000000,
-    0b001011011110110001111000000000,
+    0b101110110001111100110100100000,  # D25
+    0b010111011000111110011010010000,  # D26
+    0b101011101100011111001101000000,  # D27
+    0b010101110110001111100110100000,  # D28
+    0b011010111011000111110011010000,  # D29
+    0b100010110111101010001001110000,  # D30
 ]
 
 
@@ -22,27 +22,20 @@ def _twos(value: float, scale: float, n: int) -> int:
 
 
 def parity(word_30bit: int, D29_prev: int, D30_prev: int) -> int:
-    d = [(word_30bit >> (29 - i)) & 1 for i in range(24)]
-    if D30_prev:
-        d = [b ^ 1 for b in d]
-    src = 0
-    for b in d:
-        src = (src << 1) | b
-    full = src << 6
-    stream = [D29_prev, D30_prev] + d
+    d_src = [(word_30bit >> (29 - i)) & 1 for i in range(24)]
+    bitvec = [D29_prev, D30_prev] + d_src + [0] * 4
     parity_bits = []
     for mask in _PARITY_MASKS:
         acc = 0
         m = [(mask >> (29 - i)) & 1 for i in range(30)]
-        # first two mask positions apply to D29*, D30*
-        bitvec = [D29_prev, D30_prev] + d + [0] * 4
         for i in range(30):
-            acc ^= m[i] & bitvec[i] if i < len(bitvec) else 0
+            acc ^= m[i] & bitvec[i]
         parity_bits.append(acc)
-    p = 0
-    for b in parity_bits:
-        p = (p << 1) | b
-    return (src << 6) | p
+    d_tx = [b ^ D30_prev for b in d_src]
+    w = 0
+    for b in (d_tx + parity_bits):
+        w = (w << 1) | b
+    return w
 
 
 def _word(data_24: int, d29: int, d30: int) -> tuple[list[int], int, int]:
@@ -79,7 +72,6 @@ def subframe1_bits(eph: dict, tow_count: int, week: int) -> list[int]:
     out += w10
     return out[:300]
 
-
 def explain(eph: dict, tow_count: int, week: int) -> dict:
     bits = subframe1_bits(eph, tow_count, week)
     fields = [
@@ -90,9 +82,30 @@ def explain(eph: dict, tow_count: int, week: int) -> dict:
         {"name": "af0", "bits": "10", "scale": 2 ** -31, "raw": _twos(eph["af0"], 2 ** -31, 22), "value": eph["af0"]},
         {"name": "tgd", "bits": "7", "scale": 2 ** -31, "raw": _twos(eph["tgd"], 2 ** -31, 8), "value": eph["tgd"]},
     ]
+
+    # Dynamically verify parity across all 10 words of the subframe
+    d29 = d30 = 0
+    all_parity_ok = True
+    for k in range(10):
+        w = bits[k * 30 : (k + 1) * 30]
+        d_src = [b ^ d30 for b in w[:24]]
+        # Compute expected parity bits over d_src and (d29, d30)
+        bitvec = [d29, d30] + d_src + [0] * 4
+        expected_pb = []
+        for mask in _PARITY_MASKS:
+            acc = 0
+            m = [(mask >> (29 - i)) & 1 for i in range(30)]
+            for i in range(30):
+                acc ^= m[i] & bitvec[i]
+            expected_pb.append(acc)
+        if w[24:] != expected_pb:
+            all_parity_ok = False
+            break
+        d29, d30 = w[28], w[29]
+
     return {"subframe1": {
         "bits": bits,
         "fields": fields,
         "preamble_ok": bits[:8] == [1, 0, 0, 0, 1, 0, 1, 1],
-        "parity_ok": True,
+        "parity_ok": all_parity_ok,
     }}

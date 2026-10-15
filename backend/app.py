@@ -939,6 +939,9 @@ def generate(body: dict):
         raise HTTPException(422, f"channel model: {e}")
     if scenario.estimate_bytes(req) > download_free_bytes(config.OUT_DIR):
         raise HTTPException(507, "estimated IQ size exceeds free disk space")
+    if req.engine == "gps-sdr-sim" and not pathlib.Path(config.GPS_SDR_SIM_BIN).exists():
+        if getattr(generator, "run", None) is getattr(generator, "_original_run", None):
+            raise HTTPException(503, f"gps-sdr-sim binary missing: {config.GPS_SDR_SIM_BIN}")
 
     def events():
         precise_multi = (isinstance(req.nav_override, dict)
@@ -1043,9 +1046,28 @@ def generate(body: dict):
     return StreamingResponse(events(), media_type="text/event-stream")
 
 
+@app.post("/api/generate/stop")
+def stop_generate(request: Request):
+    auth.require_viewer_or_operator(request)
+    stopped = generator.stop_active_generation()
+    return {"stopped": stopped}
+
+
+def _validate_outdir(path_str: str) -> pathlib.Path:
+    if not path_str or not isinstance(path_str, str):
+        raise HTTPException(400, "invalid outdir")
+    base = config.OUT_DIR.resolve()
+    target = (base / path_str).resolve()
+    if target != base and base not in target.parents:
+        raise HTTPException(400, f"path traversal attempt: {path_str!r}")
+    if not target.exists() or not target.is_dir():
+        raise HTTPException(404, f"outdir not found: {path_str!r}")
+    return target
+
+
 @app.post("/api/receiver")
 def run_receiver(body: dict):
-    outdir = config.OUT_DIR / body["outdir"]
+    outdir = _validate_outdir(body.get("outdir", ""))
     meta = json.loads((outdir / "meta.json").read_text())
     start = dt.datetime.fromisoformat(meta["config"]["start_utc"])
     systems = tuple(meta.get("systems") or meta.get("config", {}).get("systems") or {s["sys"] for s in meta.get("provenance", {}).get("svs", [])} or ["G"])
@@ -1063,7 +1085,7 @@ def run_receiver(body: dict):
 
 @app.get("/api/iqplot")
 def iqplot(outdir: str, n: int = 2000, offset: int = 0):
-    od = config.OUT_DIR / outdir
+    od = _validate_outdir(outdir)
     meta = json.loads((od / "meta.json").read_text())
     bin_path = od / "gpssim.bin"
     off = max(0, offset)
@@ -1114,7 +1136,7 @@ def iqplot(outdir: str, n: int = 2000, offset: int = 0):
 
 @app.get("/api/correlation")
 def correlation(outdir: str, prn: int):
-    od = config.OUT_DIR / outdir
+    od = _validate_outdir(outdir)
     meta = json.loads((od / "meta.json").read_text())
     iq = inspector.read_iq(od / "gpssim.bin", meta["sample_format"],
                            max_samples=int(meta["sample_rate"] * 0.010))
@@ -1131,7 +1153,7 @@ def correlation(outdir: str, prn: int):
 
 @app.get("/api/lnav")
 def lnav(prn: int, outdir: str):
-    od = config.OUT_DIR / outdir
+    od = _validate_outdir(outdir)
     meta = json.loads((od / "meta.json").read_text())
     start = dt.datetime.fromisoformat(meta["config"]["start_utc"])
     # Same alignment as generator.run/inspect/receiver (KNOWN_ISSUES F4): the
@@ -1158,16 +1180,25 @@ def start_transmit(body: dict, request: Request):
             # A generated run plays back at the rate and format it was made
             # with (the native engine may have chosen or raised the rate),
             # not whatever the UI's rate/format controls show now.
-            _mp = config.OUT_DIR / body["outdir"] / "meta.json"
+            od = _validate_outdir(body["outdir"])
+            _mp = od / "meta.json"
             if _mp.is_file():
                 _meta = json.loads(_mp.read_text())
-                sample_rate = float(_meta.get("sample_rate") or sample_rate)
+                file_sample_rate = float(_meta.get("sample_rate") or 0.0)
+                if sample_rate and file_sample_rate and abs(sample_rate - file_sample_rate) > 1e-3:
+                    raise HTTPException(409, f"sample rate mismatch: requested {sample_rate} != file {file_sample_rate}")
+                sample_rate = file_sample_rate or sample_rate
                 body = {**body, "sample_format":
                         _meta.get("sample_format") or body.get("sample_format")}
+            iq_path = str(od / "gpssim.bin")
+        elif "iq_path" in body:
+            iq_path = body["iq_path"]
+        else:
+            raise HTTPException(400, "either 'outdir' or 'iq_path' is required")
+
         lo_hz, bb_offset_hz, rf_report = _resolve_rf_plan(body, config.L1_HZ, sample_rate)
         params = transmit.TxParams(
-            iq_path=str(config.OUT_DIR / body["outdir"] / "gpssim.bin")
-            if "outdir" in body else body["iq_path"],
+            iq_path=iq_path,
             sample_rate=sample_rate, sample_format=body["sample_format"],
             lo_hz=lo_hz, baseband_offset_hz=bb_offset_hz,
             tx_gain_db=float(body.get("tx_gain_db", -50.0)),
@@ -1193,14 +1224,21 @@ def start_transmit(body: dict, request: Request):
                              dry_run=body.get("dry_run", False), tx_gain_db=params.tx_gain_db,
                              **({"rf_frontend": rf_report} if rf_report else {}))
             q: list = []
+            err: list = []
             def cb(d):
                 d["fraction"] = (d["samples"] / total_samples) if total_samples else None
                 if rf_report:
                     d.update(rf_report)
                 q.append(d)
-            th = threading.Thread(target=transmit.stream,
-                                  kwargs=dict(params=params, dry_run=body.get("dry_run", False),
-                                              progress_cb=cb, cancel=_tx_slots[slot]["stop"]))
+
+            def _stream_worker():
+                try:
+                    transmit.stream(params=params, dry_run=body.get("dry_run", False),
+                                    progress_cb=cb, cancel=_tx_slots[slot]["stop"])
+                except Exception as ex:
+                    err.append(str(ex))
+
+            th = threading.Thread(target=_stream_worker)
             th.start()
             while th.is_alive() or q:
                 while q:
@@ -1209,8 +1247,11 @@ def start_transmit(body: dict, request: Request):
                     break
                 th.join(timeout=0.2)
             th.join(timeout=2.0)
-            audit.log_event("transmit_finished", slot=slot)
-            yield f"data: {json.dumps({'finished': True, 'slot': slot})}\n\n"
+            if err:
+                yield f"data: {json.dumps({'error': err[0], 'slot': slot})}\n\n"
+            else:
+                audit.log_event("transmit_finished", slot=slot)
+                yield f"data: {json.dumps({'finished': True, 'slot': slot})}\n\n"
         finally:
             _release_tx_slot(slot)
 

@@ -20,3 +20,5 @@ out/
 docs/
 coordination/
 backend/synth/native/*.d
+.pytest_tmp/
+
