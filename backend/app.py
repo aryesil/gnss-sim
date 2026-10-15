@@ -1162,10 +1162,9 @@ def lnav(prn: int, outdir: str):
     eph_all, _ = _resolve_eph(start.date(), meta["config"].get("rinex_path"))
     gps_start = start + dt.timedelta(seconds=config.GPS_UTC_LEAP_S)
     week, sow = ephemeris.gps_week_and_sow(gps_start)
-    eph = ephemeris.align_epochs(
-        eph_all, week, sow,
-        kepler_grid_s=ephemeris.toe_grid_for(meta.get("provenance", {}).get("engine")))[prn]
-    return lnav_display.explain(eph, tow_count=int(_gps_tow(start) / 6), week=int(eph.get("gps_week", 0)))
+    # IS-GPS-200 20.3.3.2: HOW TOW-count is the count of the NEXT subframe's leading edge
+    tow_count = int(_gps_tow(start) / 6) + 1
+    return lnav_display.explain(eph, tow_count=tow_count, week=int(eph.get("gps_week", 0)))
 
 
 @app.post("/api/transmit")

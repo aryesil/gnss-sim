@@ -57,9 +57,12 @@ def subframe1_bits(eph: dict, tow_count: int, week: int) -> list[int]:
     wn = (week & 0x3FF) << 14
     w3, d29, d30 = _word(wn, d29, d30)
     out += w3
-    for _ in range(4):
+    for _ in range(3):
         w, d29, d30 = _word(0, d29, d30)
         out += w
+    tgd = _twos(eph.get("tgd", 0.0), 2 ** -31, 8) & 0xFF
+    w7, d29, d30 = _word(tgd, d29, d30)
+    out += w7
     toc = (int(round(eph["toc"] / 16)) & 0xFFFF) << 8
     w8, d29, d30 = _word(toc, d29, d30)
     out += w8

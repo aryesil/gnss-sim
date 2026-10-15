@@ -37,6 +37,10 @@ RINEX_MIRRORS = [
     # confirmed against the live directory listing; georinex's use="G" filter
     # picks the GPS records back out of it.
     "https://igs.bkg.bund.de/root_ftp/IGS/BRDC/{yyyy}/{ddd}/BRDC00WRD_R_{yyyy}{ddd}0000_01D_MN.rnx.gz",
+    # ESA GSSC open portal:
+    "https://gssc.esa.int/portal/rest/file/gnss/data/daily/{yyyy}/{ddd}/BRDC00WRD_R_{yyyy}{ddd}0000_01D_MN.rnx.gz",
+    # Legacy RINEX 2 daily broadcast GPS nav:
+    "https://igs.bkg.bund.de/root_ftp/IGS/BRDC/{yyyy}/{ddd}/brdc{ddd}0.{yy}n.gz",
     # CDDIS requires a NASA Earthdata login; without credentials it returns
     # a 200 OK HTML login page instead of the file. ephemeris._download's
     # "RINEX VERSION" content check already rejects that, so this mirror is
