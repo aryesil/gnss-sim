@@ -47,11 +47,11 @@ def viterbi_free_decode(coded: Sequence[int] | np.ndarray) -> list[int]:
     return _viterbi.viterbi_free_decode(coded, invert_g2=True)
 
 
-def viterbi_decode(coded: Sequence[int] | np.ndarray) -> list[int]:
+def viterbi_decode(coded: Sequence[int] | np.ndarray, *, end_state: int | None = 0) -> list[int]:
     """Hard-decision Viterbi decoder for rate-1/2 K=7 convolutional code with G2 inverted.
-    Known starting state is 0 (each page part starts from state 0).
+    Known starting state is 0, default ending state is 0 (zero-tail kısıtlaması).
     """
-    return _viterbi.viterbi_decode(coded, invert_g2=True, known_start_state=0)
+    return _viterbi.viterbi_decode(coded, invert_g2=True, known_start_state=0, end_state=end_state)
 
 
 def decode_word_fields(wtype: int, word_bits: list[int]) -> dict[str, Any]:
@@ -67,30 +67,12 @@ def decode_word_fields(wtype: int, word_bits: list[int]) -> dict[str, Any]:
     return out
 
 
-def decode_page(even_syms: list[int], odd_syms: list[int]) -> dict[str, Any] | None:
-    """Decode a 500-symbol nominal page from even and odd 250-symbol page parts."""
-    if len(even_syms) != L.HALF_PAGE_SYMS or len(odd_syms) != L.HALF_PAGE_SYMS:
-        return None
-
-    # Deinterleave 240 symbols
-    even_coded = deinterleave_30x8(even_syms[L.SYNC_SYMS:])
-    odd_coded = deinterleave_30x8(odd_syms[L.SYNC_SYMS:])
-
-    # Decode convolutional code (try free decode first, fallback to Viterbi)
-    even_bits = viterbi_free_decode(even_coded)
-    odd_bits = viterbi_free_decode(odd_coded)
-
-    # Validate even/odd bit and page type:
-    # even: even/odd bit == 0, page type == 0
-    # odd:  even/odd bit == 1, page type == 0
+def _try_bits(even_bits: list[int], odd_bits: list[int]) -> dict[str, Any] | None:
+    """I/NAV çift/tek bit dizisinden alanları ve CRC doğruluğunu değerlendirir."""
     if len(even_bits) < 120 or len(odd_bits) < 120:
         return None
     if even_bits[0] != 0 or odd_bits[0] != 1:
-        # Try full Viterbi decode
-        even_bits = viterbi_decode(even_coded)
-        odd_bits = viterbi_decode(odd_coded)
-        if even_bits[0] != 0 or odd_bits[0] != 1:
-            return None
+        return None
 
     data_k = even_bits[2:114]
     data_j = odd_bits[2:18]
@@ -112,6 +94,32 @@ def decode_page(even_syms: list[int], odd_syms: list[int]) -> dict[str, Any] | N
         "word_bits": word_bits,
         "fields": decode_word_fields(wtype, word_bits) if crc_ok else {},
     }
+
+
+def decode_page(even_syms: list[int], odd_syms: list[int]) -> dict[str, Any] | None:
+    """Decode a 500-symbol nominal page from even and odd 250-symbol page parts."""
+    if len(even_syms) != L.HALF_PAGE_SYMS or len(odd_syms) != L.HALF_PAGE_SYMS:
+        return None
+
+    # Deinterleave 240 symbols
+    even_coded = deinterleave_30x8(even_syms[L.SYNC_SYMS:])
+    odd_coded = deinterleave_30x8(odd_syms[L.SYNC_SYMS:])
+
+    # 1. Hızlı yol: gürültüsüz kanal için viterbi_free_decode
+    even_bits = viterbi_free_decode(even_coded)
+    odd_bits = viterbi_free_decode(odd_coded)
+    res = _try_bits(even_bits, odd_bits)
+    if res is not None and res["crc_ok"]:
+        return res
+
+    # 2. Fallback: CRC başarısız ise tam Viterbi çözücü (known_start_state=0, end_state=0 ile zero-tail)
+    even_bits_v = _viterbi.viterbi_decode(even_coded, invert_g2=True, known_start_state=0, end_state=0)
+    odd_bits_v = _viterbi.viterbi_decode(odd_coded, invert_g2=True, known_start_state=0, end_state=0)
+    res_v = _try_bits(even_bits_v, odd_bits_v)
+    if res_v is not None and res_v["crc_ok"]:
+        return res_v
+
+    return res_v if res_v is not None else res
 
 
 def decode_messages(sym01: list[int] | np.ndarray) -> list[dict[str, Any]]:

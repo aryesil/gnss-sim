@@ -57,12 +57,43 @@ def test_viterbi_corrects_single_error(erec):
     page = I.build_page(1, erec, int(_SOW), 1325)
     even = page[:250]
     odd = list(page[250:])
-    # A single symbol error is within the rate-1/2 convolutional code's correction capacity
+    # Tek sembol hatası (tek yarıda) Viterbi fallback ile düzeltilir
     odd[100] ^= 1
 
     res = D.decode_page(even, odd)
     assert res is not None
     assert res["crc_ok"] is True
+
+
+def test_viterbi_corrects_single_error_in_even_part(erec):
+    """Çift sayfadaki tek sembol hatasının Viterbi fallback ile kurtarılması."""
+    from backend.analysis import inav_decode as D
+
+    page = I.build_page(1, erec, int(_SOW), 1325)
+    even = list(page[:250])
+    odd = page[250:]
+    even[80] ^= 1
+
+    res = D.decode_page(even, odd)
+    assert res is not None
+    assert res["crc_ok"] is True
+    assert res["type"] == 1
+
+
+def test_viterbi_corrects_two_errors_across_fec_blocks(erec):
+    """Farklı FEC bloklarında (biri çift, biri tek sayfada) 1'er sembol hatasının kurtarılması."""
+    from backend.analysis import inav_decode as D
+
+    page = I.build_page(1, erec, int(_SOW), 1325)
+    even = list(page[:250])
+    odd = list(page[250:])
+    even[60] ^= 1
+    odd[120] ^= 1
+
+    res = D.decode_page(even, odd)
+    assert res is not None
+    assert res["crc_ok"] is True
+    assert res["type"] == 1
 
 
 def test_decode_page_crc_corrupted(erec):
@@ -71,8 +102,9 @@ def test_decode_page_crc_corrupted(erec):
     page = I.build_page(1, erec, int(_SOW), 1325)
     even = page[:250]
     odd = list(page[250:])
-    # Corrupt a burst of 10 symbols, exceeding ECC capacity
-    for idx in range(100, 110):
+    # 30x8 serpiştiricinin dağıtma kapasitesini ve K=7 Viterbi düzeltme sınırını
+    # aşacak büyüklükte (50 sembol) bir hata bloğu enjekte et
+    for idx in range(50, 100):
         odd[idx] ^= 1
 
     res = D.decode_page(even, odd)

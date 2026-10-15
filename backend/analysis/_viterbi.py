@@ -152,6 +152,7 @@ def viterbi_decode(
     *,
     invert_g2: bool = True,
     known_start_state: int | None = None,
+    end_state: int | None = None,
 ) -> list[int]:
     """Vectorized hard-decision Viterbi decoder for rate-1/2 K=7 convolutional code.
 
@@ -168,6 +169,9 @@ def viterbi_decode(
     known_start_state : int | None, default None
         Constrained start state (e.g. 0 for packetized page
         parts), or None for unconstrained/free initial state.
+    end_state : int | None, default None
+        Constrained end state (e.g. 0 for zero-tail flushed blocks),
+        or None to select the state with the minimum accumulated metric.
 
     Returns
     -------
@@ -203,8 +207,8 @@ def viterbi_decode(
         metric = np.where(take_p1, c1, c0)
         prev[k] = np.where(take_p1, _P1, _P0)
 
-    # Traceback
-    st = int(np.argmin(metric))
+    # Traceback: end_state verildiyse (zero-tail için 0) o durumdan, yoksa en düşük metriğe sahip durumdan başla
+    st = int(end_state) if end_state is not None else int(np.argmin(metric))
     bits = [0] * n
     for k in range(n - 1, -1, -1):
         bits[k] = st & 1
