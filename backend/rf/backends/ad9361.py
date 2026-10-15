@@ -69,6 +69,36 @@ def _set_tx_lo_powerdown(handle, down: bool) -> None:
         pass
 
 
+def _set_rx_lo_powerdown(handle, down: bool = True) -> None:
+    # altvoltage0 is the RX LO. During transmit the app never receives;
+    # powering down the RX PLL saves power, lowers thermal dissipation
+    # by ~5-10 deg C, and avoids unnecessary internal mixer cross-talk.
+    try:
+        ch = _phy_channel(handle, "altvoltage0")
+        if ch is not None:
+            ch.attrs["powerdown"].value = "1" if down else "0"
+    except Exception:
+        pass
+
+
+def _set_ensm_mode(handle, mode: str) -> None:
+    try:
+        ctrl = getattr(handle, "_ctrl", None)
+        if ctrl is not None and "ensm_mode" in ctrl.attrs:
+            avail = ctrl.attrs.get("ensm_mode_available", None)
+            modes = avail.value.split() if avail is not None else []
+            if mode in modes:
+                ctrl.attrs["ensm_mode"].value = mode
+            elif "fdd" in modes:
+                ctrl.attrs["ensm_mode"].value = "fdd"
+            elif "tx" in modes:
+                ctrl.attrs["ensm_mode"].value = "tx"
+            elif "alert" in modes and mode == "alert":
+                ctrl.attrs["ensm_mode"].value = "alert"
+    except Exception:
+        pass
+
+
 def _count_tx_channels(handle) -> int:
     """Complex TX channels the DDS core really exposes. A stock
     PlutoSDR/AD9363 runs 1R1T (voltage0/1 only); 2 needs a 2R2T mode
@@ -149,7 +179,9 @@ def open_tx(uri: str, lo_hz: float, sample_rate: float, *,
         sdr._txdac.set_kernel_buffers_count(_KERNEL_BUFFERS)
     except Exception:
         pass
+    _set_rx_lo_powerdown(sdr, True)
     _set_tx_lo_powerdown(sdr, False)
+    _set_ensm_mode(sdr, "fdd")
     err = _tx_rate_error_ppm(sdr, sample_rate)
     if err is not None and abs(err) > 0.05:
         # The BBPLL setting the driver picks depends on its previous state;
@@ -209,6 +241,10 @@ def close(handle) -> None:
             setattr(handle, f"tx_hardwaregain_chan{c}", _MUTE_GAIN_DB)
     except Exception:
         pass
+    try:
+        handle.disable_dds()
+    except Exception:
+        pass
     n = len(active_channels(handle))
     try:
         zero = np.zeros(_ZERO_FLUSH_SAMPLES, dtype=np.complex64)
@@ -219,12 +255,32 @@ def close(handle) -> None:
         handle.tx_destroy_buffer()
     except Exception:
         pass
+    _set_rx_lo_powerdown(handle, True)
     _set_tx_lo_powerdown(handle, True)
+    _set_ensm_mode(handle, "alert")
 
 
 def probe_open(uri: str):
     import adi  # pyadi-iio
-    return adi.Pluto(uri=uri)
+    sdr = adi.Pluto(uri=uri)
+    # When connected in standby: power down both RX LO and TX LO to keep
+    # the chip cool and quiet until an actual transmit starts.
+    _set_rx_lo_powerdown(sdr, True)
+    _set_tx_lo_powerdown(sdr, True)
+    _set_ensm_mode(sdr, "alert")
+    return sdr
+
+
+def probe_close(handle) -> None:
+    """Invoked when disconnecting from the SDR in the UI.
+    Restores RX LO (powerdown=0), ensures TX LO remains off (powerdown=1),
+    and transitions ENSM back to fdd mode."""
+    try:
+        _set_rx_lo_powerdown(handle, False)  # Turn RX LO ON
+        _set_tx_lo_powerdown(handle, True)   # Keep TX LO OFF
+        _set_ensm_mode(handle, "fdd")
+    except Exception:
+        pass
 
 
 def probe_info(handle) -> dict:

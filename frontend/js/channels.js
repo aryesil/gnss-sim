@@ -58,6 +58,7 @@ window.addChannel = function () {
         <label>Start UTC <input type="datetime-local" id="${id}-start-utc"></label>
         <label title="Live Start only: run on the real current GPS time (needed by phones / A-GPS receivers)"><input type="checkbox" id="${id}-start-now"> Live: now</label>
         <label>Duration s <input type="number" id="${id}-duration" value="300"></label>
+        <label title="Auto-stop live transmission when duration expires"><input type="checkbox" id="${id}-duration-autostop" checked> Auto-stop after duration</label>
         <label>Sample rate <select id="${id}-rate" title="auto: the lowest rate that holds every selected system (native engine); gps-sdr-sim uses 2.6 MSPS">
           <option value="auto" selected>auto</option><option>2600000</option><option>4000000</option><option>5000000</option><option>8000000</option><option>10000000</option><option>15000000</option>
         </select></label>
@@ -391,7 +392,10 @@ function wireChannelActions(id) {
   }
   [`${id}-fmt`, `${id}-rate`, `${id}-duration`].forEach(elId => {
     document.getElementById(elId).addEventListener('input', _updateSizeEstimate);
-    document.getElementById(elId).addEventListener('change', _updateSizeEstimate);
+    document.getElementById(elId).addEventListener('change', () => {
+      _updateSizeEstimate();
+      st.lastOutdir = null;
+    });
   });
   _updateSizeEstimate();
 
@@ -1055,6 +1059,80 @@ function wireChannelActions(id) {
       });
       return;
     }
+
+    const badge = document.getElementById(`${id}-badge`);
+
+    // Intelligent Start: If an IQ run has already been generated, transmit that file directly!
+    // This gives rock-solid, 100% constant DMA streaming with zero CPU live-synthesis overhead.
+    if (st.lastOutdir) {
+      const fileBody = {
+        outdir: st.lastOutdir,
+        sample_rate: _rateValue() || 2600000,
+        sample_format: document.getElementById(`${id}-fmt`).value || 'int16',
+        uri: document.getElementById(`${id}-uri`).value,
+        kind: document.getElementById(`${id}-kind`).value,
+        lo_hz: Number(document.getElementById(`${id}-lo`).value),
+        tx_gain_db: Number(document.getElementById(`${id}-gain`).value),
+        slot: document.getElementById(`${id}-tx-slot`).value,
+        confirm_isolated: document.getElementById(`${id}-tx-confirm`).checked,
+        dry_run: document.getElementById(`${id}-tx-dryrun`).checked,
+      };
+      const r = await fetch('/api/transmit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fileBody),
+      });
+      if (r.status === 403) { alert('Set ALLOW_TX and tick the isolated-setup confirmation.'); return; }
+      if (r.status === 409) {
+        let detail = 'both TX1 and TX2 are already transmitting';
+        try { const d = await r.json(); detail = d.detail || detail; } catch (e) {}
+        alert(detail);
+        return;
+      }
+      if (!r.ok) {
+        let detail;
+        try { const d = await r.json(); detail = d.detail || JSON.stringify(d); }
+        catch (e) { detail = 'HTTP ' + r.status; }
+        const msg = 'Channel ' + id + ' transmit failed: ' + detail;
+        document.getElementById(`${id}-warnings`).textContent = msg;
+        if (window.logLine) logLine(msg, 'error');
+        alert(msg);
+        return;
+      }
+      badge.textContent = 'TRANSMITTING'; badge.classList.add('badge-live');
+      logLine(`Channel ${id}: transmitting generated file (${st.lastOutdir})`, 'info');
+      const rd = r.body.getReader(), dec = new TextDecoder();
+      (function pump() {
+        rd.read().then(({ value, done }) => {
+          if (done) return;
+          dec.decode(value).split('\n\n').forEach(chunk => {
+            const line = chunk.replace(/^data: /, '').trim(); if (!line) return;
+            const msg = JSON.parse(line);
+            if (msg.slot) {
+              channelState(id).txSlot = msg.slot;
+              enableLiveTabs(id, msg.slot);
+            }
+            if (msg.fraction !== undefined && msg.fraction !== null) {
+              const p = document.getElementById(`${id}-gen-progress`);
+              if (p) p.value = msg.fraction;
+            }
+            if (msg.finished) {
+              badge.textContent = 'STOPPED'; badge.classList.remove('badge-live'); disableLiveTabs(id);
+              logLine(`Channel ${id}: file transmit finished`, 'info');
+            }
+            if (msg.error) {
+              badge.textContent = 'STOPPED'; badge.classList.remove('badge-live'); disableLiveTabs(id);
+              logLine(`Channel ${id} error: ${msg.error}`, 'error');
+              alert(`Transmit error: ${msg.error}`);
+            }
+          });
+          pump();
+        }).catch(() => {
+          badge.textContent = 'STOPPED'; badge.classList.remove('badge-live');
+          disableLiveTabs(id);
+        });
+      })();
+      return;
+    }
+
     const body = {
       rinex_path: document.getElementById(`${id}-rinex-path`).value.trim() || 'AUTO',
       lat: ll.lat, lon: ll.lng, alt: 100,
@@ -1079,7 +1157,12 @@ function wireChannelActions(id) {
     const prnInput = document.getElementById(`${id}-lnav-prn`);
     if (prnInput && prnInput.value) body.track_prn = Number(prnInput.value);
     const maxDurInput = document.getElementById(`${id}-max-duration`);
-    if (maxDurInput && maxDurInput.value) body.max_duration_s = Number(maxDurInput.value);
+    const autoStopChecked = (document.getElementById(`${id}-duration-autostop`) || {}).checked;
+    if (maxDurInput && maxDurInput.value) {
+      body.max_duration_s = Number(maxDurInput.value);
+    } else if (autoStopChecked && body.duration_s) {
+      body.max_duration_s = Number(body.duration_s);
+    }
     if (st.timeline.length) body.timeline = st.timeline;
     if (document.getElementById(`${id}-record`).checked) body.record = true;
     const r = await fetch('/api/live/start', {
@@ -1110,7 +1193,6 @@ function wireChannelActions(id) {
       alert(msg);
       return;
     }
-    const badge = document.getElementById(`${id}-badge`);
     badge.textContent = 'LIVE'; badge.classList.add('badge-live');
     const rd = r.body.getReader(), dec = new TextDecoder();
     (function pump() {
@@ -1138,8 +1220,12 @@ function wireChannelActions(id) {
 
   document.getElementById(`${id}-stop`).onclick = () => {
     const slot = channelState(id).txSlot;
-    if (slot) fetch('/api/live/stop', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slot }),
+    const b = slot ? JSON.stringify({ slot }) : '{}';
+    fetch('/api/live/stop', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: b,
+    });
+    fetch('/api/transmit/stop', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: b,
     });
   };
 }

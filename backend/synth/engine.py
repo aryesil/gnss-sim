@@ -82,6 +82,41 @@ def _native_prn(sysc: str, prn: int) -> int:
     return prn + _PRN_OFFSET.get(sysc, 0)
 
 
+def _filter_sbas_entries(entries: list[dict], lat: float, lon: float) -> list[dict]:
+    """Filter SBAS entries to the regional provider matching receiver position.
+    Commercial receivers (e.g. u-blox) check regional service boundaries and
+    reject out-of-region SBAS satellites (e.g. GAGAN/MSAS in Europe/Turkey).
+    Also prevents RF transmit power dilution across 9+ competing geostationary SVs.
+    """
+    sbas_entries = [e for e in entries if e.get("sys") == "S"]
+    if len(sbas_entries) <= 2:
+        return entries
+
+    regional_prns: set[int] = set()
+    n_lon = ((float(lon) + 180.0) % 360.0) - 180.0
+    n_lat = float(lat)
+    if -30.0 <= n_lon <= 55.0 and 15.0 <= n_lat <= 75.0:
+        regional_prns = {120, 123, 124, 126, 136}  # EGNOS (Europe, Turkey, Mid-East)
+    elif -170.0 <= n_lon <= -50.0 and 10.0 <= n_lat <= 75.0:
+        regional_prns = {131, 133, 135, 138}        # WAAS (North America)
+    elif 120.0 <= n_lon <= 160.0 and 20.0 <= n_lat <= 60.0:
+        regional_prns = {129, 137}                  # MSAS (Japan)
+    elif 60.0 <= n_lon <= 100.0 and 0.0 <= n_lat <= 40.0:
+        regional_prns = {127, 128, 132}             # GAGAN (India)
+    elif 110.0 <= n_lon <= 180.0 and n_lat < 0.0:
+        regional_prns = {122, 144}                  # SouthPAN (Australia/NZ)
+
+    matched = [e for e in sbas_entries if int(e.get("prn", 0)) in regional_prns]
+    if not matched:
+        sbas_sorted = sorted(sbas_entries, key=lambda e: float(e.get("el_deg", 0.0)), reverse=True)
+        matched = sbas_sorted[:2]
+    else:
+        matched = sorted(matched, key=lambda e: float(e.get("el_deg", 0.0)), reverse=True)[:2]
+
+    kept_sbas = set(id(e) for e in matched)
+    return [e for e in entries if e.get("sys") != "S" or id(e) in kept_sbas]
+
+
 _GLO_G1_CODE = None
 
 
@@ -893,6 +928,7 @@ def run(req, progress_cb=None) -> pathlib.Path:
             e["_state"] = state_fns.get((e["sys"], e["prn"]))
             e["_nav_eph"] = nav_eph_by_key.get((e["sys"], e["prn"]))
             e["prn"] = _native_prn(e["sys"], e["prn"])
+        entries = _filter_sbas_entries(entries, float(getattr(req, "lat", 0.0)), float(getattr(req, "lon", 0.0)))
         systems = tuple(sorted({e["sys"] for e in entries}))
     else:
         if nav_override:
@@ -948,6 +984,7 @@ def run(req, progress_cb=None) -> pathlib.Path:
         for e in entries:
             e["_state"] = eph.get((e["sys"], e["prn"]), eph.get(e["prn"]))
             e["prn"] = _native_prn(e["sys"], e["prn"])
+        entries = _filter_sbas_entries(entries, float(getattr(req, "lat", 0.0)), float(getattr(req, "lon", 0.0)))
 
     # --- Signal-level terms a real receiver removes using the broadcast
     # message. Every receiver applies the broadcast TGD/BGD, the broadcast
@@ -1065,6 +1102,18 @@ def run(req, progress_cb=None) -> pathlib.Path:
                 "R": "strings", "S": "sbas", "I": "navic"}.get(sysc, "on")
 
     if getattr(req, "nav_message", True):
+        gps_prns = [int(x["prn"]) for x in entries if x.get("sys") == "G" and x.get("prn")]
+        eph_by_prn = {}
+        for x in entries:
+            p_x = int(x.get("prn", 0) or 0)
+            if p_x:
+                rec_x = x.get("_nav_eph") if precise_multi else x.get("_state")
+                if isinstance(rec_x, dict):
+                    eph_by_prn[p_x] = rec_x
+                    sys_x = x.get("sys")
+                    if sys_x:
+                        eph_by_prn[(sys_x, p_x)] = rec_x
+
         for e in entries:
             sysc = e["sys"]
             # precise_multi: `_state` is a callable state_fn (SP-B trajectory
@@ -1077,7 +1126,11 @@ def run(req, progress_cb=None) -> pathlib.Path:
                 res = nav_encoders.nav_stream_for(
                     sysc, e["signal_id"], rec, hdr, week, sow - _NAV_LEAD_S,
                     req.duration_s + _NAV_LEAD_S,
-                    prn=int(e.get("prn", 0)))
+                    eph_by_prn=eph_by_prn,
+                    prn=int(e.get("prn", 0)),
+                    rx_lat=float(getattr(req, "lat", 0.0)),
+                    rx_lon=float(getattr(req, "lon", 0.0)),
+                    gps_prns=gps_prns)
             except (KeyError, ValueError) as exc:
                 warnings.append(f"{sysc}{e['prn']}: nav-message encode failed "
                                 f"({exc}); data symbol left constant")

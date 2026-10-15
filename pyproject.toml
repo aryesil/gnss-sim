@@ -12,6 +12,7 @@ dependencies = [
     "requests>=2.31",
     "georinex>=1.16",
     "python-dateutil>=2.9",
+    "pylibiio<1.0",
     "pyadi-iio>=0.0.16",
     "bladerf",
 ]

@@ -59,11 +59,15 @@ def _safe_reprobe(backend, handle) -> dict:
 
 
 def disconnect(uri: str, kind: str = "pluto") -> None:
+    backend = BACKENDS.get(kind)
     with _lock:
         entry = _devices.pop((kind, uri), None)
-    # Dropping the last reference closes the underlying context (libiio for
-    # pluto, libbladeRF for bladerf) -- see module docstring.
-    if entry is not None:
+    if entry is not None and entry.get("handle") is not None:
+        if backend is not None and hasattr(backend, "probe_close"):
+            try:
+                backend.probe_close(entry["handle"])
+            except Exception:
+                pass
         entry["handle"] = None
 
 
