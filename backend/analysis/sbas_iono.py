@@ -6,6 +6,7 @@ Maintains DO-229 continuous rate-1/2 convolutional FEC at 500 sym/s.
 """
 from __future__ import annotations
 
+import datetime as dt
 import math
 from typing import Sequence, Any
 
@@ -85,6 +86,24 @@ def find_best_band(lat_deg: float, lon_deg: float) -> int:
     # Band 0: [-180, -140), Band 1: [-140, -100), ... Band 4: [-20, 20), Band 5: [20, 60)
     b = int(math.floor((lon + 180.0) / 40.0))
     return max(0, min(8, b))
+
+
+def find_bands_for_region(lat_deg: float, lon_deg: float, lon_window_deg: float = 25.0) -> list[int]:
+    """RTCA DO-229 Bölüm A.4.4.10 uyarınca alıcının görünür bölgesini kapsayan tüm iyonosfer bandlarını belirler."""
+    bands = set()
+    if lat_deg > 55.0:
+        bands.add(9)
+    if lat_deg < -55.0:
+        bands.add(10)
+
+    lon_center = ((float(lon_deg) + 180.0) % 360.0) - 180.0
+    for offset in np.linspace(-lon_window_deg, lon_window_deg, 11):
+        sample_lon = ((lon_center + offset + 180.0) % 360.0) - 180.0
+        b = int(math.floor((sample_lon + 180.0) / 40.0))
+        b = max(0, min(8, b))
+        bands.add(b)
+
+    return sorted(bands)
 
 
 def _bits_of(value: int, n: int) -> list[int]:
@@ -386,13 +405,10 @@ def encode_type9(eph: dict[str, Any], tow_s: float = 0.0, iodn: int = 0, urai: i
     b.extend(_bits_of(u_val, 4))
 
     # 4. Position: X (30b, 0.08m), Y (30b, 0.08m), Z (25b, 0.4m)
+    # georinex ve ephemeris parser değerleri doğrudan SI (metre, m/s, m/s^2) cinsinden sağlar.
     x_m = float(eph.get("x_m", 0.0) or 0.0)
     y_m = float(eph.get("y_m", 0.0) or 0.0)
     z_m = float(eph.get("z_m", 0.0) or 0.0)
-    if math.hypot(x_m, y_m) > 1e8:
-        x_m *= 1e-3
-        y_m *= 1e-3
-        z_m *= 1e-3
     b.extend(sbas_encode.twos(x_m, 0.08, 30))
     b.extend(sbas_encode.twos(y_m, 0.08, 30))
     b.extend(sbas_encode.twos(z_m, 0.4, 25))
@@ -401,10 +417,6 @@ def encode_type9(eph: dict[str, Any], tow_s: float = 0.0, iodn: int = 0, urai: i
     vx = float(eph.get("vx", 0.0) or 0.0)
     vy = float(eph.get("vy", 0.0) or 0.0)
     vz = float(eph.get("vz", 0.0) or 0.0)
-    if math.hypot(vx, vy) > 1e5:
-        vx *= 1e-3
-        vy *= 1e-3
-        vz *= 1e-3
     b.extend(sbas_encode.twos(vx, 0.000625, 17))
     b.extend(sbas_encode.twos(vy, 0.000625, 17))
     b.extend(sbas_encode.twos(vz, 0.004, 18))
@@ -475,7 +487,13 @@ def nav_stream(eph: dict, week: int, tow0_sow: float, duration_s: float,
 
     imap = ionex_map
     if imap is None:
-        imap = ionex.load_or_fetch_ionex()
+        # Simülasyon tarihini week ve tow0_sow'dan türet; week <= 0 veya yoksa
+        # testlerde ağ erişimi yapılmaması için sentetik haritaya düş.
+        if week is not None and week > 0:
+            target_dt = dt.datetime(1980, 1, 6, tzinfo=dt.timezone.utc) + dt.timedelta(weeks=week, seconds=float(tow0_sow))
+            imap = ionex.load_or_fetch_ionex(target_dt)
+        else:
+            imap = ionex.synthetic_ionex()
 
     # Determine reference receiver location: if not given, use GEO sub-satellite point
     if rx_lat is None or rx_lon is None:
@@ -503,24 +521,26 @@ def nav_stream(eph: dict, week: int, tow0_sow: float, duration_s: float,
         active_gps = list(range(1, 14))  # default 13 PRNs to populate MT 2 cleanly
     active_gps = active_gps[:13]          # MT 2 handles first 13 PRNs
 
-    band = find_best_band(ref_lat, ref_lon)
-    all_band_igps = get_band_igps(band)
-    mask_bits, active_indices = select_active_igps(band, ref_lat, ref_lon, radius_deg=18.0)
+    # RTCA DO-229 Bölüm A.4.4.10 uyarınca alıcının görünür bölgesini kapsayan tüm bandları belirle:
+    bands = find_bands_for_region(ref_lat, ref_lon, lon_window_deg=25.0)
+    num_bands = len(bands)
 
-    # Compute vertical delay for each active IGP at initial epoch
-    delays_active = [
-        imap.get_vertical_delay_m(all_band_igps[idx][0], all_band_igps[idx][1], tow0_sow)
-        for idx in active_indices
-    ]
-    gives_active = [3] * len(active_indices)  # standard high-confidence GIVEI
-
-    # Partition active IGPs into 15-IGP blocks for Message Type 26
-    n_blocks = max(1, int(math.ceil(len(active_indices) / 15.0)))
+    band_masks = {}
     blocks_26 = []
-    for b_id in range(n_blocks):
-        b_delays = delays_active[b_id * 15 : (b_id + 1) * 15]
-        b_gives = gives_active[b_id * 15 : (b_id + 1) * 15]
-        blocks_26.append((b_id, b_delays, b_gives))
+    for b in bands:
+        all_b_igps = get_band_igps(b)
+        b_mask_bits, b_active_indices = select_active_igps(b, ref_lat, ref_lon, radius_deg=18.0)
+        band_masks[b] = b_mask_bits
+        delays_b = [
+            imap.get_vertical_delay_m(all_b_igps[idx][0], all_b_igps[idx][1], tow0_sow)
+            for idx in b_active_indices
+        ]
+        gives_b = [3] * len(b_active_indices)
+        n_b_blocks = max(1, int(math.ceil(len(b_active_indices) / 15.0)))
+        for b_id in range(n_b_blocks):
+            b_delays = delays_b[b_id * 15 : (b_id + 1) * 15]
+            b_gives = gives_b[b_id * 15 : (b_id + 1) * 15]
+            blocks_26.append((b, b_id, b_delays, b_gives))
 
     # Build DO-229 Message Type 25 (Long-Term Corrections) with matching IODE for each GPS SV
     sat_corrections = []
@@ -544,7 +564,6 @@ def nav_stream(eph: dict, week: int, tow0_sow: float, duration_s: float,
     blk_mt2 = lambda k: build_type2_block(k, prc_list=[0.0] * len(active_gps),
                                           udre_list=[3] * len(active_gps),
                                           iodf=0, iodp=iodp)
-    blk_mt18 = lambda k: build_type18_block(k, band, mask_bits, iodi=iodi, num_bands=1)
     ai_list = [1] * len(active_gps)
     blk_mt7 = lambda k: build_type7_block(k, ai_list, t_lat=0, iodp=iodp)
 
@@ -565,7 +584,10 @@ def nav_stream(eph: dict, week: int, tow0_sow: float, duration_s: float,
     # 7: Type 7 (Fast Correction Degradation Factor)
     # 8: Type 25 (Long-Term Corrections - Block 1, 3, ...)
     # 9: Type 2 (Fast Corrections)
-    for i in range(nblk):
+    # Segment yeniden başlatmada (canlı mod) konvolüsyonel kodlayıcı yazmacının
+    # sürekliliğini sağlamak için döngü k0-1 bloğundan başlatılır (warm-up),
+    # ardından ilk 500 sembol atılarak gerçek yayındaki yazmaç durumu korunur.
+    for i in range(-1, nblk):
         k = k0 + i
         sec = k % 10
         cycle = k // 10
@@ -576,11 +598,14 @@ def nav_stream(eph: dict, week: int, tow0_sow: float, duration_s: float,
         elif sec in (2, 6, 9):
             blk = blk_mt2(k)
         elif sec == 3:
-            blk = blk_mt18(k)
+            # Type 18 (IGP Mask): Görünür tüm bandlar cycle % num_bands ile periyodik olarak yayınlanır.
+            b18_band = bands[cycle % num_bands]
+            blk = build_type18_block(k, b18_band, band_masks[b18_band], iodi=iodi, num_bands=num_bands)
         elif sec == 4:
+            # Type 26 (Iono Delays): Tüm bandların blokları sıra ile döndürülür.
             b26_idx = cycle % len(blocks_26)
-            b_id, b_delays, b_gives = blocks_26[b26_idx]
-            blk = build_type26_block(k, band, b_id, b_delays, b_gives, iodi=iodi)
+            b_band, b_id, b_delays, b_gives = blocks_26[b26_idx]
+            blk = build_type26_block(k, b_band, b_id, b_delays, b_gives, iodi=iodi)
         elif sec == 5:
             b25_idx = (cycle * 2) % len(blocks_25)
             blk = build_type25_block(k, blocks_25[b25_idx], iodp=iodp)
@@ -594,5 +619,6 @@ def nav_stream(eph: dict, week: int, tow0_sow: float, duration_s: float,
 
         syms.extend(conv.encode(blk))
 
+    syms = syms[500:]
     arr = np.asarray(syms, dtype=np.int8)
     return np.where(arr > 0, np.int8(1), np.int8(-1)).astype(np.int8), SYM_RATE_HZ

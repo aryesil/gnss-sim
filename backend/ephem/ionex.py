@@ -37,9 +37,14 @@ class IonexMap:
     tec: np.ndarray               # 3D array [n_epochs, n_lats, n_lons] in TECU
     height_km: float = 350.0      # Ionospheric shell height in km
     rms: np.ndarray | None = None # Optional RMS uncertainty array
+    periodic_day: bool = False    # Sentetik 24 saatlik haritalarda haftalık SoW'u güne sarmak için
 
     def get_vtec(self, lat_deg: float, lon_deg: float, sow: float) -> float:
         """Interpolate Vertical TEC (TECU) at (lat, lon, sow)."""
+        if self.periodic_day:
+            # 24 saatlik sentetik IONEX haritaları için SoW gün içine sarılarak
+            # multi-day simülasyonlarda son epoch'a kilitlenme engellenir.
+            sow = float(sow) % 86400.0
         lat_clamped = max(float(self.lats[-1]), min(float(self.lats[0]), float(lat_deg)))
         # Normalize longitude into [-180, 180)
         lon_norm = ((float(lon_deg) + 180.0) % 360.0) - 180.0
@@ -303,6 +308,7 @@ def synthetic_ionex(date: dt.date | dt.datetime | None = None,
         lons=lons,
         tec=tec_maps,
         height_km=350.0,
+        periodic_day=True,
     )
 
 

@@ -188,7 +188,10 @@ def align_epochs(eph_by_prn: dict[int, dict], week: int, sow: float,
                 e2["toe_ref"] = _glonass_toe_ref(e2["toe_ref"], sow,
                                                  kepler_grid_s, keep_real_within_s)
             else:
-                e2["toe_ref"] = sow
+                # RTCA DO-229 Tablo A-8 gereği SBAS t0,GEO 16 saniye kuantalamasına sahiptir.
+                # Motor geometrisi ile yayınlanan efemerisin uyuşması ve konum hatası
+                # oluşmaması için toe_ref 16 saniye ızgarasına yuvarlanır.
+                e2["toe_ref"] = (float(sow) // 16.0) * 16.0
         elif (keep_real_within_s > 0
               and e2.get("system", "G") in _REAL_EPOCH_SYS
               and "gps_week" in e2
@@ -422,6 +425,8 @@ def _parse_rinex_multi(path: str | pathlib.Path, systems=("G",),
         e: dict = {"system": s, "prn": prn}
         vmap = (_VARMAP_BDS if s == "C" else _VARMAP_GAL if s == "E" else
                 _VARMAP_KEPLER if s in _KEPLER_SYS else _VARMAP_STATE)
+        # georinex nav3 parser'ı S ve R durum vektörlerini (X, dX, dX2) RINEX km biriminden
+        # otomatik olarak SI birimlerine (metre, m/s, m/s^2) dönüştürerek döndürür.
         for key, var in vmap.items():
             if var is None or var not in rec:
                 continue

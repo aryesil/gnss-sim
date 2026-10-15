@@ -251,8 +251,10 @@ def parse_type9(data_bits: list[int]) -> dict[str, Any]:
     """Parse Message Type 9 (GEO Navigation Message) 212-bit data field.
     Supports both RTCA DO-229 Table A-8 standard framing and legacy mock framing.
     """
-    # Detect standard RTCA DO-229 Table A-8 (X_G at bit 25..54, Y_G at 55..84, Z_G at 85..109)
-    # Standard geostationary orbit radius is ~4.2164e7 m (3.5e7 <= R <= 4.5e7 m) and t_0 <= 5400.
+    # Algoritmik gerekçe: Kod çözücü hem standart DO-229 Tablo A-8 formatını
+    # (X_G bit 25..54, Y_G bit 55..84, t0 <= 5400, r ~ 42164 km) hem de eski testlerin
+    # kullandığı düz mock bit dizilimini otomatik olarak ayırt etmek için GEO yarıçapı
+    # (35000-45000 km) ve t0 sınırlarını doğrular.
     t0_cand = _u(data_bits, 8, 13) if len(data_bits) >= 21 else 9999
     r_std = math.hypot(
         _s(data_bits, 25, 30) * 0.08,
@@ -363,8 +365,14 @@ def decode_messages(symbols: list[int] | np.ndarray) -> list[dict[str, Any]]:
     return res
 
 
-def reconstruct_ephemeris(blocks: list[dict[str, Any]], prn: int | None = None) -> dict[str, Any]:
-    """Reconstruct an SBAS GEO broadcast ephemeris dict from decoded blocks."""
+def reconstruct_ephemeris(blocks: list[dict[str, Any]], prn: int | None = None,
+                          week_sow0: float | None = None) -> dict[str, Any]:
+    """Reconstruct an SBAS GEO broadcast ephemeris dict from decoded blocks.
+
+    Not: RTCA DO-229 Type 9 t0_GEO parametresi gün-içi saniyedir (0..86400 s).
+    Dönen toe_ref değeri t0'dır. Tam haftalık SoW gerekliyse week_sow0 verilerek
+    (week_sow0 // 86400) * 86400 + t0 biçiminde haftalık SoW hesaplanabilir.
+    """
     t9 = None
     for blk in blocks:
         if blk.get("crc_ok") and blk.get("type") == 9:
@@ -372,6 +380,12 @@ def reconstruct_ephemeris(blocks: list[dict[str, Any]], prn: int | None = None) 
             break
     if t9 is None:
         raise ValueError("need at least one CRC-valid SBAS Type 9 block")
+
+    t0_val = t9.get("toe_ref", 0.0)
+    if week_sow0 is not None:
+        toe_val = (float(week_sow0) // 86400.0) * 86400.0 + t0_val
+    else:
+        toe_val = t0_val
 
     rec: dict[str, Any] = {
         "system": "S",
@@ -386,7 +400,7 @@ def reconstruct_ephemeris(blocks: list[dict[str, Any]], prn: int | None = None) 
         "ax": t9.get("ax", 0.0),
         "ay": t9.get("ay", 0.0),
         "az": t9.get("az", 0.0),
-        "toe_ref": t9.get("toe_ref", 0.0),
+        "toe_ref": toe_val,
         "tau": t9.get("tau", 0.0),
         "gamma": t9.get("gamma", 0.0),
         "af0": t9.get("af0", 0.0),

@@ -16,9 +16,15 @@ from __future__ import annotations
 from typing import Sequence
 import numpy as np
 
-# Standard polynomials for K=7 rate-1/2 convolutional code
-_G1 = 0o171  # 121 (0b1111001)
-_G2 = 0o133  # 91  (0b1011011)
+# Standart SBAS L1 polinomları (RTCA DO-229 / ICAO Annex 10):
+# Standart 171_8 ve 133_8 polinomları MSB=en-yeni konvansiyonudur. Yazmaçta ((st<<1)|b) ile
+# en yeni bit LSB'de olduğundan, 7-bit zaman tersi olan 0o117 (G1) ve 0o155 (G2) kullanılır.
+_G1 = 0o117  # 73  (0b1001111)
+_G2 = 0o155  # 109 (0b1101101)
+
+# G2 terslemeli miras modlar (Galileo I/NAV, GPS CNAV, F/NAV) için polinomlar:
+_G1_INV = 0o171  # 121 (0b1111001)
+_G2_INV = 0o133  # 91  (0b1011011)
 
 
 def _parity(x: int) -> int:
@@ -26,7 +32,7 @@ def _parity(x: int) -> int:
     return (int(x) & 0xFFFFFFFF).bit_count() & 1
 
 
-def _build_trellis_tables(invert_g2: bool) -> tuple[np.ndarray, np.ndarray]:
+def _build_trellis_tables(invert_g2: bool, g1: int = _G1, g2: int = _G2) -> tuple[np.ndarray, np.ndarray]:
     """Build legacy-compatible next-state and output tables for rate-1/2 K=7 code."""
     nxt = np.zeros((64, 2), dtype=np.int64)
     out = np.zeros((64, 2, 2), dtype=np.int64)
@@ -35,17 +41,17 @@ def _build_trellis_tables(invert_g2: bool) -> tuple[np.ndarray, np.ndarray]:
         for b in (0, 1):
             r = ((st << 1) | b) & 0x7F
             nxt[st, b] = r & 0x3F
-            out[st, b, 0] = _parity(r & _G1)
-            out[st, b, 1] = _parity(r & _G2) ^ g2_inv
+            out[st, b, 0] = _parity(r & g1)
+            out[st, b, 1] = _parity(r & g2) ^ g2_inv
     return nxt, out
 
 
 # Legacy transition tables retained for backward compatibility
-_NXT_INV, _OUT_INV = _build_trellis_tables(invert_g2=True)
-_NXT_STD, _OUT_STD = _build_trellis_tables(invert_g2=False)
+_NXT_INV, _OUT_INV = _build_trellis_tables(invert_g2=True, g1=_G1_INV, g2=_G2_INV)
+_NXT_STD, _OUT_STD = _build_trellis_tables(invert_g2=False, g1=_G1, g2=_G2)
 
 
-def _precompute_branch_metrics(invert_g2: bool) -> tuple[np.ndarray, np.ndarray]:
+def _precompute_branch_metrics(invert_g2: bool, g1: int = _G1, g2: int = _G2) -> tuple[np.ndarray, np.ndarray]:
     """Precompute branch metric lookup tables for all 4 possible received symbol pairs.
 
     Returns:
@@ -61,10 +67,10 @@ def _precompute_branch_metrics(invert_g2: bool) -> tuple[np.ndarray, np.ndarray]
         # From pred1 = (d >> 1) | 32 with bit (d & 1): register is d | 64
         r0 = d
         r1 = d | 64
-        out0_0 = _parity(r0 & _G1)
-        out0_1 = _parity(r0 & _G2) ^ g2_inv
-        out1_0 = _parity(r1 & _G1)
-        out1_1 = _parity(r1 & _G2) ^ g2_inv
+        out0_0 = _parity(r0 & g1)
+        out0_1 = _parity(r0 & g2) ^ g2_inv
+        out1_0 = _parity(r1 & g1)
+        out1_1 = _parity(r1 & g2) ^ g2_inv
         for y0 in (0, 1):
             for y1 in (0, 1):
                 idx = (y0 << 1) | y1
@@ -73,11 +79,11 @@ def _precompute_branch_metrics(invert_g2: bool) -> tuple[np.ndarray, np.ndarray]
     return bm0, bm1
 
 
-_BM0_INV, _BM1_INV = _precompute_branch_metrics(invert_g2=True)
-_BM0_STD, _BM1_STD = _precompute_branch_metrics(invert_g2=False)
+_BM0_INV, _BM1_INV = _precompute_branch_metrics(invert_g2=True, g1=_G1_INV, g2=_G2_INV)
+_BM0_STD, _BM1_STD = _precompute_branch_metrics(invert_g2=False, g1=_G1, g2=_G2)
 
 
-def _build_free_table(invert_g2: bool) -> list[list[tuple[int, int]]]:
+def _build_free_table(invert_g2: bool, g1: int = _G1, g2: int = _G2) -> list[list[tuple[int, int]]]:
     """Precompute transition table for clean-channel free decoding."""
     table = []
     g2_inv = 1 if invert_g2 else 0
@@ -89,7 +95,7 @@ def _build_free_table(invert_g2: bool) -> list[list[tuple[int, int]]]:
             found = False
             for cand in (0, 1):
                 r = ((st << 1) | cand) & 0x7F
-                if _parity(r & _G1) == y0 and (_parity(r & _G2) ^ g2_inv) == y1:
+                if _parity(r & g1) == y0 and (_parity(r & g2) ^ g2_inv) == y1:
                     row.append((cand, r & 0x3F))
                     found = True
                     break
@@ -99,8 +105,8 @@ def _build_free_table(invert_g2: bool) -> list[list[tuple[int, int]]]:
     return table
 
 
-_FREE_TABLE_INV = _build_free_table(invert_g2=True)
-_FREE_TABLE_STD = _build_free_table(invert_g2=False)
+_FREE_TABLE_INV = _build_free_table(invert_g2=True, g1=_G1_INV, g2=_G2_INV)
+_FREE_TABLE_STD = _build_free_table(invert_g2=False, g1=_G1, g2=_G2)
 
 # Static predecessor index arrays
 _D = np.arange(64, dtype=np.int64)

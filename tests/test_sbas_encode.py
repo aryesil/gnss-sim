@@ -45,3 +45,12 @@ def test_stream_is_deterministic(srec):
     b, _ = S.nav_stream(srec, 0, 561600.0, 6)
     assert np.array_equal(a, b)
     assert sorted(set(a.tolist())) == [-1, 1]
+
+
+def test_stream_continuity_across_segment_restarts(srec):
+    """Segment yeniden başlatıldığında (TOW=T vs TOW=T-1), kodlayıcı durumunun
+    k0-1 bloğu ile ısınması sayesinde semboller bit bit özdeş olmalıdır."""
+    stream_t, _ = S.nav_stream(srec, 0, 561600.0, 20)
+    stream_prev, _ = S.nav_stream(srec, 0, 561599.0, 21)
+    # stream_prev'in ilk 500 sembolü (1 saniye = T-1 bloğu) atıldığında, T anındaki stream_t ile birebir eşleşmeli
+    assert np.array_equal(stream_t, stream_prev[500:])

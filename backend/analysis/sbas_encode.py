@@ -24,9 +24,14 @@ import numpy as np
 SYM_RATE_HZ = 500.0
 _PREAMBLES = (0x53, 0x9A, 0xC6)
 _CRC24Q = 0x1864CFB
-_G1 = 0o171
-_G2 = 0o133
+# Standart SBAS L1 polinomları (RTCA DO-229 / ICAO Annex 10):
+# Standart 171_8 ve 133_8 polinomları MSB=en-yeni gösterimidir. Yazmaçta ((reg<<1)|b) ile
+# en yeni bit LSB'de tutulduğundan, 7-bit zaman tersi olan 0o117 (G1) ve 0o155 (G2) kullanılır.
+_G1 = 0o117
+_G2 = 0o155
 
+# STANDART DEĞİL: Aşağıdaki ölçekler yalnızca eski mock test uyumluluğu içindir.
+# Gerçek RTCA DO-229 Type 9 formatı sbas_iono.py içindedir.
 _POS = 0.08          # metres  (DO-229 GEO position LSB)
 _VEL = 0.000625      # m/s
 _ACC = 0.0000050     # m/s^2
@@ -52,14 +57,11 @@ def twos(value, scale, n) -> list[int]:
 
 
 def crc24q(bits: list[int]) -> list[int]:
+    # RTCA DO-229 / ICAO Annex 10 doğrudan form CRC-24Q:
+    # reg ^= bit << 23 döngüsü M(x)*x^24 mod g(x) hesaplar; fazladan 24 sıfır kaydırma sonucu bozar.
     reg = 0
     for b in bits:
         reg ^= (int(b) & 1) << 23
-        reg <<= 1
-        if reg & (1 << 24):
-            reg ^= _CRC24Q
-        reg &= 0xFFFFFF
-    for _ in range(24):
         reg <<= 1
         if reg & (1 << 24):
             reg ^= _CRC24Q
@@ -107,6 +109,8 @@ def conv_decode_stream(coded: list[int]) -> list[int]:
 # --------------------------------------------------------------------------
 # blocks
 # --------------------------------------------------------------------------
+# STANDART DEĞİL: Bu fonksiyon yalnızca eski round-trip testlerinin geriye dönük
+# uyumluluğu içindir. Standart DO-229 Type 9 yapısı sbas_iono.py içindedir.
 def _type9_data(eph: dict) -> list[int]:
     b: list[int] = []
     b += bits_of(0, 8)                                   # IODN / spare
@@ -142,18 +146,25 @@ def nav_stream(eph: dict, week: int, tow0_sow: float, duration_s: float,
     # schedule follow GPS time, not the stream start -- a stream started
     # later (live mode restarts it every segment) continues the sequence.
     k0 = int(math.floor(float(tow0_sow)))
-    for i in range(nblk):
+    # Segment yeniden başlatmada (canlı mod) konvolüsyonel kodlayıcı yazmacının
+    # sürekliliğini sağlamak için döngü k0-1 bloğundan başlatılır (warm-up),
+    # ardından ilk 500 sembol atılarak gerçek yayındaki yazmaç durumu korunur.
+    for i in range(-1, nblk):
         k = k0 + i
         mtype = 9 if (k % 2 == 0) else 63
         syms.extend(conv.encode(build_block(k, mtype, eph)))
+    syms = syms[500:]
     a = np.asarray(syms, dtype=np.int8)
     return np.where(a > 0, np.int8(1), np.int8(-1)).astype(np.int8), SYM_RATE_HZ
 
 
 def decode_stream(stream: np.ndarray) -> list[dict]:
     """Recover the message blocks from a clean stream (round-trip test)."""
+    # Segment başında kodlayıcı durumu serbest (unconstrained) olduğundan
+    # Viterbi kod çözücü kullanılarak semboller hatasız çözülür.
+    from backend.analysis._viterbi import viterbi_decode
     coded = (np.asarray(stream) > 0).astype(int).tolist()
-    data = conv_decode_stream(coded)
+    data = viterbi_decode(coded, invert_g2=False)
     out = []
     for i in range(len(data) // 250):
         blk = data[i * 250:(i + 1) * 250]
