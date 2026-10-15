@@ -191,6 +191,56 @@ def test_sbas_nav_stream_generates_mt1_mt2_mt7_mt9_mt18_mt25_mt26(srec):
     assert 25 in types, "Stream must contain Type 25 (Long-Term Satellite Error Corrections)"
     assert 26 in types, "Stream must contain Type 26 (Ionospheric Delay Corrections)"
 
+    # Verify standard DO-229 Type 9 in stream has healthy URAI (0) so commercial receivers don't reject GEO
+    t9_blocks = [b for b in blks if b["type"] == 9]
+    assert len(t9_blocks) >= 1
+    for t9 in t9_blocks:
+        parsed9 = sbas_decode.parse_type9(t9["data"])
+        assert parsed9["urai"] == 0, f"GEO must be healthy (urai=0), got {parsed9['urai']}"
+        exp_x = srec["x_m"] * 1e-3 if srec["x_m"] > 1e8 else srec["x_m"]
+        assert abs(parsed9["x_m"] - exp_x) < 0.1
+
+
+def test_type9_encode_and_decode_roundtrip_do229():
+    """Verify DO-229 Table A-8 Message Type 9 (GEO Navigation Message) roundtrip."""
+    eph = {
+        "x_m": -24000000.0,
+        "y_m": 34000000.0,
+        "z_m": 1200000.0,
+        "vx": 1.25,
+        "vy": -5.0,
+        "vz": 0.125,
+        "ax": 0.00001,
+        "ay": -0.00002,
+        "az": 0.000015,
+        "toe_ref": 43200.0,
+        "af0": 1.5e-8,
+        "af1": 2.5e-12,
+        "urai": 0,
+        "iodn": 5,
+    }
+    blk = sbas_iono.build_type9_block(idx=0, eph=eph, tow_s=43200.0)
+    assert len(blk) == 250
+
+    decoded = sbas_decode.decode_block(blk)
+    assert decoded is not None
+    assert decoded["crc_ok"] is True
+    assert decoded["type"] == 9
+    assert decoded["iodn"] == 5
+    assert decoded["urai"] == 0
+    assert decoded["toe_ref"] == pytest.approx(43200.0, abs=16.0)
+    assert decoded["x_m"] == pytest.approx(eph["x_m"], abs=0.08)
+    assert decoded["y_m"] == pytest.approx(eph["y_m"], abs=0.08)
+    assert decoded["z_m"] == pytest.approx(eph["z_m"], abs=0.4)
+    assert decoded["vx"] == pytest.approx(eph["vx"], abs=0.000625)
+    assert decoded["vy"] == pytest.approx(eph["vy"], abs=0.000625)
+    assert decoded["vz"] == pytest.approx(eph["vz"], abs=0.004)
+    assert decoded["ax"] == pytest.approx(eph["ax"], abs=0.0000125)
+    assert decoded["ay"] == pytest.approx(eph["ay"], abs=0.0000125)
+    assert decoded["az"] == pytest.approx(eph["az"], abs=0.0000625)
+    assert decoded["af0"] == pytest.approx(eph["af0"], abs=2.0 ** -31)
+    assert decoded["af1"] == pytest.approx(eph["af1"], abs=2.0 ** -40)
+
 
 def test_sbas_nav_stream_is_deterministic(srec):
     """Verify deterministic symbol generation."""
@@ -198,4 +248,5 @@ def test_sbas_nav_stream_is_deterministic(srec):
     b, _ = sbas_iono.nav_stream(srec, 0, 561600.0, 6, rx_lat=41.0, rx_lon=29.0)
     assert np.array_equal(a, b)
     assert sorted(set(a.tolist())) == [-1, 1]
+
 
