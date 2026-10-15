@@ -66,14 +66,11 @@ def uns(value: float, scale: float, n: int) -> int:
 
 def _crc24q(bits: list[int]) -> list[int]:
     """CRC-24Q (poly 0x1864CFB, init 0), MSB-first over `bits`."""
+    # Doğrudan form CRC-24Q: reg ^= bit<<23 döngüsü M(x)*x^24 mod g(x) üretir.
+    # Fazladan 24 sıfır kaydırma standardı bozar, bu yüzden trailing sıfır kaydırma uygulanmaz.
     reg = 0
     for b in bits:
         reg ^= (int(b) & 1) << 23
-        reg <<= 1
-        if reg & (1 << 24):
-            reg ^= _CRC24Q
-        reg &= 0xFFFFFF
-    for _ in range(24):
         reg <<= 1
         if reg & (1 << 24):
             reg ^= _CRC24Q
