@@ -5,7 +5,9 @@ import datetime as dt
 import json
 import pathlib
 import re
+import shutil
 import subprocess
+import threading
 
 from backend.models import channel_models, impairments as imp, multipath as mp_mod, receiver_clock as rc_mod
 from backend import config, gpstime, inspector, scenario
@@ -20,6 +22,29 @@ _TIME_RE = re.compile(r"Time into run\s*=\s*([0-9.]+)")
 
 class GeneratorError(Exception):
     pass
+
+
+class GeneratorCancelled(GeneratorError):
+    pass
+
+
+_active_proc_lock = threading.Lock()
+_active_generation_proc: subprocess.Popen | None = None
+_active_cancel_event: threading.Event | None = None
+
+
+def stop_active_generation() -> bool:
+    with _active_proc_lock:
+        if _active_cancel_event:
+            _active_cancel_event.set()
+        proc = _active_generation_proc
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+                return True
+            except OSError:
+                pass
+    return False
 
 
 def parse_progress(line: str, duration_s: float) -> float | None:
@@ -67,14 +92,33 @@ def _run_gps_sdr_sim(argv: list[str], duration_s: float, progress_cb=None) -> No
     exec core for run() and run_segment()."""
     tail_lines: list[str] = []
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    for line in proc.stdout:
-        tail_lines.append(line)
-        if len(tail_lines) > 100:
-            tail_lines.pop(0)
-        frac = parse_progress(line, duration_s)
-        if frac is not None and progress_cb:
-            progress_cb(frac)
-    proc.wait()
+    with _active_proc_lock:
+        global _active_generation_proc
+        _active_generation_proc = proc
+    try:
+        for line in proc.stdout:
+            with _active_proc_lock:
+                if _active_cancel_event and _active_cancel_event.is_set():
+                    proc.terminate()
+                    break
+            tail_lines.append(line)
+            if len(tail_lines) > 100:
+                tail_lines.pop(0)
+            frac = parse_progress(line, duration_s)
+            if frac is not None and progress_cb:
+                progress_cb(frac)
+        try:
+            proc.wait(timeout=3.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    finally:
+        with _active_proc_lock:
+            if _active_generation_proc is proc:
+                _active_generation_proc = None
+    with _active_proc_lock:
+        if _active_cancel_event and _active_cancel_event.is_set():
+            raise GeneratorCancelled("generation cancelled by operator")
     if proc.returncode != 0:
         tail = "".join(tail_lines)[-2000:]
         raise GeneratorError(f"gps-sdr-sim exit {proc.returncode}: {tail}")
@@ -215,74 +259,87 @@ def run(req: scenario.ScenarioRequest, progress_cb=None, binary: str | None = No
     outdir.mkdir(parents=True, exist_ok=True)
     out_bin = outdir / "gpssim.bin"
 
-    motion_csv = None
-    if req.route:
-        motion_csv = str(outdir / "motion.csv")
-        scenario.write_motion_csv(req, motion_csv)
+    cancel_ev = threading.Event()
+    with _active_proc_lock:
+        global _active_cancel_event
+        _active_cancel_event = cancel_ev
 
-    argv = [b] + scenario.build_args(req, str(out_bin), motion_csv)
-    nav_path = _prepare_nav(req, outdir)
-    argv[argv.index("-e") + 1] = str(nav_path)
-    _run_gps_sdr_sim(argv, req.duration_s, progress_cb)
-    if progress_cb:
-        progress_cb(1.0)
-
-    channel_report = _apply_channel(req, out_bin)
-    impairment_report = _apply_impairments(req, out_bin)
-
-    integrity = None
     try:
-        integrity = iq_integrity.validate_file(
-            out_bin, req.sample_format, req.sample_rate,
-            expected_duration_s=None, max_samples=_INTEGRITY_MAX_SAMPLES)
-    except (OSError, ValueError):
-        integrity = {"ok": None, "problems": ["integrity check could not run"]}
+        motion_csv = None
+        if req.route:
+            motion_csv = str(outdir / "motion.csv")
+            scenario.write_motion_csv(req, motion_csv)
 
-    ephemeris_mode = "precise" if req.nav_override is not None else "broadcast"
-    provenance = {
-        "scenario_hash": prov.scenario_hash(req),
-        "generator_version": prov.git_revision(),
-        "gps_sdr_sim_version": binary_version(b),
-        "rinex_sha256": prov.sha256_file(req.rinex_path) if req.rinex_path else None,
-        "nav_sha256": prov.sha256_file(nav_path),
-        "random_seed": getattr(req, "random_seed", None),
-        "impairments": impairment_report,
-        "channel_models": channel_report,
-    }
-    if req.nav_override is not None:
-        fits = [e["_fit"] for e in req.nav_override.values() if "_fit" in e]
-        srcs = {f.get("source") for f in fits}
-        provenance["precise"] = {
-            "sp3_source": next(iter(srcs)) if len(srcs) == 1 else sorted(map(str, srcs)),
-            "fit_prns": sorted(req.nav_override),
-            "fit_method": "damped Levenberg-Marquardt on 15 broadcast params, "
-                          "dense post-fit validation with geometry.sat_state",
-            "fit_tolerance_m": fits[0]["pos_tol_m"] if fits else None,
-            "worst_dense_pos_resid_m": max((f["max_pos_resid_m"] for f in fits),
-                                           default=None),
-            "fallback_used": False,
+        argv = [b] + scenario.build_args(req, str(out_bin), motion_csv)
+        nav_path = _prepare_nav(req, outdir)
+        argv[argv.index("-e") + 1] = str(nav_path)
+        _run_gps_sdr_sim(argv, req.duration_s, progress_cb)
+        if progress_cb:
+            progress_cb(1.0)
+
+        channel_report = _apply_channel(req, out_bin)
+        impairment_report = _apply_impairments(req, out_bin)
+
+        integrity = None
+        try:
+            integrity = iq_integrity.validate_file(
+                out_bin, req.sample_format, req.sample_rate,
+                expected_duration_s=None, max_samples=_INTEGRITY_MAX_SAMPLES)
+        except (OSError, ValueError):
+            integrity = {"ok": None, "problems": ["integrity check could not run"]}
+
+        ephemeris_mode = "precise" if req.nav_override is not None else "broadcast"
+        provenance = {
+            "scenario_hash": prov.scenario_hash(req),
+            "generator_version": prov.git_revision(),
+            "gps_sdr_sim_version": binary_version(b),
+            "rinex_sha256": prov.sha256_file(req.rinex_path) if req.rinex_path else None,
+            "nav_sha256": prov.sha256_file(nav_path),
+            "random_seed": getattr(req, "random_seed", None),
+            "impairments": impairment_report,
+            "channel_models": channel_report,
         }
+        if req.nav_override is not None:
+            fits = [e["_fit"] for e in req.nav_override.values() if "_fit" in e]
+            srcs = {f.get("source") for f in fits}
+            provenance["precise"] = {
+                "sp3_source": next(iter(srcs)) if len(srcs) == 1 else sorted(map(str, srcs)),
+                "fit_prns": sorted(req.nav_override),
+                "fit_method": "damped Levenberg-Marquardt on 15 broadcast params, "
+                              "dense post-fit validation with geometry.sat_state",
+                "fit_tolerance_m": fits[0]["pos_tol_m"] if fits else None,
+                "worst_dense_pos_resid_m": max((f["max_pos_resid_m"] for f in fits),
+                                               default=None),
+                "fallback_used": False,
+            }
 
-    meta = {
-        "config": {
-            "lat": req.lat, "lon": req.lon, "alt": req.alt,
-            "start_utc": req.start.isoformat(), "duration_s": req.duration_s,
-            "rinex_path": req.rinex_path, "route": req.route,
-            "ephemeris_mode": ephemeris_mode,
-        },
-        "provenance": provenance,
-        "precise_fit": ([e["_fit"] for e in req.nav_override.values() if "_fit" in e]
-                        if req.nav_override is not None else None),
-        "argv": argv,
-        "binary_version": binary_version(b),
-        "sample_rate": req.sample_rate,
-        "sample_format": req.sample_format,
-        "created_utc": dt.datetime.utcnow().isoformat(),
-        "output": "gpssim.bin",
-        "iq_integrity": integrity,
-    }
-    (outdir / "meta.json").write_text(json.dumps(meta, indent=2))
-    return outdir
+        meta = {
+            "config": {
+                "lat": req.lat, "lon": req.lon, "alt": req.alt,
+                "start_utc": req.start.isoformat(), "duration_s": req.duration_s,
+                "rinex_path": req.rinex_path, "route": req.route,
+                "ephemeris_mode": ephemeris_mode,
+            },
+            "provenance": provenance,
+            "precise_fit": ([e["_fit"] for e in req.nav_override.values() if "_fit" in e]
+                            if req.nav_override is not None else None),
+            "argv": argv,
+            "binary_version": binary_version(b),
+            "sample_rate": req.sample_rate,
+            "sample_format": req.sample_format,
+            "created_utc": dt.datetime.utcnow().isoformat(),
+            "output": "gpssim.bin",
+            "iq_integrity": integrity,
+        }
+        (outdir / "meta.json").write_text(json.dumps(meta, indent=2))
+        return outdir
+    except GeneratorCancelled:
+        shutil.rmtree(outdir, ignore_errors=True)
+        raise
+    finally:
+        with _active_proc_lock:
+            if _active_cancel_event is cancel_ev:
+                _active_cancel_event = None
 
 
 def run_segment(base_req: scenario.ScenarioRequest, llh: tuple[float, float, float],
@@ -312,3 +369,6 @@ def run_segment(base_req: scenario.ScenarioRequest, llh: tuple[float, float, flo
     argv[argv.index("-e") + 1] = str(nav_path)
     _run_gps_sdr_sim(argv, duration_s)
     return outdir
+
+
+_original_run = run

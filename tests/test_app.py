@@ -224,3 +224,70 @@ def test_transmit_rejects_invalid_rf_plan_with_400(client, monkeypatch, tmp_path
     }
     r = client.post("/api/transmit", json=body)
     assert r.status_code == 400
+
+
+def test_outdir_path_traversal_rejected(client):
+    r = client.get("/api/iqplot?outdir=../../etc")
+    assert r.status_code in (400, 404)
+
+    r = client.get("/api/correlation?outdir=../../etc&prn=1")
+    assert r.status_code in (400, 404)
+
+    r = client.get("/api/lnav?outdir=../../etc&prn=1")
+    assert r.status_code in (400, 404)
+
+    r = client.post("/api/receiver", json={"outdir": "../../etc"})
+    assert r.status_code in (400, 404)
+
+
+def test_generate_stop_endpoint(client, monkeypatch):
+    from backend import generator
+    monkeypatch.setattr(generator, "stop_active_generation", lambda: True)
+    r = client.post("/api/generate/stop")
+    assert r.status_code == 200
+    assert r.json() == {"stopped": True}
+
+
+def test_transmit_rejects_rate_mismatch_with_outdir(client, monkeypatch, tmp_path):
+    from backend import config
+    import json
+    monkeypatch.setattr(config, "ALLOW_TX", True)
+    monkeypatch.setattr(config, "OUT_DIR", tmp_path)
+    od = tmp_path / "run1"
+    od.mkdir()
+    (od / "meta.json").write_text(json.dumps({"sample_rate": 2.6e6, "sample_format": "int16"}))
+    (od / "gpssim.bin").write_bytes(b"\x00\x00" * 100)
+    body = {
+        "outdir": "run1",
+        "sample_rate": 4.0e6,
+        "confirm_isolated": True,
+        "dry_run": True,
+    }
+    r = client.post("/api/transmit", json=body)
+    assert r.status_code == 409
+    assert "sample rate mismatch" in r.json()["detail"]
+
+
+def test_transmit_propagates_stream_error_via_sse(client, monkeypatch, tmp_path):
+    from backend import config
+    from backend.rf import transmit
+    monkeypatch.setattr(config, "ALLOW_TX", True)
+    p = tmp_path / "g.bin"
+    p.write_bytes(b"\x00\x00" * 200)
+
+    def failing_stream(**kw):
+        raise RuntimeError("device clamped LO")
+
+    monkeypatch.setattr(transmit, "stream", failing_stream)
+    body = {
+        "iq_path": str(p),
+        "sample_rate": 2.6e6,
+        "sample_format": "int16",
+        "confirm_isolated": True,
+        "dry_run": True,
+    }
+    r = client.post("/api/transmit", json=body)
+    assert r.status_code == 200
+    text = "".join(list(r.iter_text()))
+    assert "device clamped LO" in text
+    assert '"finished": true' not in text.lower()

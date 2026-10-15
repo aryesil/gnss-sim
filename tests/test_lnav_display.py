@@ -28,3 +28,14 @@ def test_explain_reports_fields_and_checks():
     assert sf["parity_ok"] is True
     names = {f["name"] for f in sf["fields"]}
     assert {"week_number", "af0", "af1", "af2", "toc", "tgd"} <= names
+
+
+def test_explain_reports_parity_false_on_corrupt_bit(monkeypatch):
+    orig = lnav_display.subframe1_bits
+    def corrupt(eph, tow_count, week):
+        b = orig(eph, tow_count, week)
+        b[95] ^= 1
+        return b
+    monkeypatch.setattr(lnav_display, "subframe1_bits", corrupt)
+    out = lnav_display.explain(_eph(), tow_count=100, week=2380)
+    assert out["subframe1"]["parity_ok"] is False

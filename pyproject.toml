@@ -24,3 +24,5 @@ include = ["backend*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--basetemp=D:/codes/gps-sim/.pytest_tmp"
+
