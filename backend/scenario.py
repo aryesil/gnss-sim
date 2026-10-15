@@ -97,6 +97,7 @@ class ScenarioRequest:
     eph_epoch: dt.datetime | None = None
     outdir: pathlib.Path | None = None
     skip_meta: bool = False
+    in_memory: bool = False
 
     def __post_init__(self):
         self.systems = _norm_systems(self.systems)

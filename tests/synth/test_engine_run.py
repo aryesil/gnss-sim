@@ -75,3 +75,19 @@ def test_engine_code_phase_matches_geometry_convention(tmp_path, monkeypatch):
     d = abs(acq["code_phase_chips"] - geo_phase)
     resid = min(d, 1023 - d)
     assert resid <= 2.0, (strongest["prn"], acq["code_phase_chips"], geo_phase, resid)
+
+
+def test_engine_run_in_memory_no_disk(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "OUT_DIR", tmp_path)
+    req = _req()
+    req.in_memory = True
+    req.duration_s = 1
+    res = engine.run(req)
+    assert isinstance(res, dict)
+    assert "gpssim.bin" in res
+    raw = res["gpssim.bin"]
+    assert len(raw) == int(req.sample_rate * 1 * 2)
+    # verify zero files created in tmp_path
+    assert list(tmp_path.iterdir()) == []
+    iq = inspector.raw_to_iq(raw)
+    assert len(iq) == int(req.sample_rate * 1)

@@ -19,9 +19,12 @@ static int run_one_band(const BandSpec &b,
                         void (*progress)(double, void *), void *user) {
     const SvSpec *specs = b.svs;
     const int nsv = b.nsv;
-    if (!b.out_path || (nsv > 0 && !specs)) return -1;
-    std::FILE *f = std::fopen(b.out_path, "wb");
-    if (!f) return -1;
+    if ((!b.out_path && !b.out_mem) || (nsv > 0 && !specs)) return -1;
+    std::FILE *f = nullptr;
+    if (b.out_path) {
+        f = std::fopen(b.out_path, "wb");
+        if (!f) return -1;
+    }
 
     std::vector<gs::SvChannel> ch(static_cast<size_t>(nsv));
     for (int i = 0; i < nsv; ++i) {
@@ -128,32 +131,37 @@ static int run_one_band(const BandSpec &b,
             std::fill(iq, iq + 2 * (hi - lo), 0.0f);
             gs::mix_block(ch.data(), nsv, b.fs, done + static_cast<uint64_t>(lo),
                           hi - lo, iq);
-            gs::quantize_block(iq, 2 * (hi - lo), b.quant, scale,
-                               q + static_cast<size_t>(2 * lo) * esz);
+            uint8_t *dst = b.out_mem ? (b.out_mem + static_cast<size_t>(done + lo) * 2u * esz)
+                                     : (q + static_cast<size_t>(2 * lo) * esz);
+            gs::quantize_block(iq, 2 * (hi - lo), b.quant, scale, dst);
         });
-        if (writer.joinable()) {
-            writer.join();
-            if (!write_ok) {
-                rc = -2;
-                break;
+        if (f) {
+            if (writer.joinable()) {
+                writer.join();
+                if (!write_ok) {
+                    rc = -2;
+                    break;
+                }
             }
+            write_n = static_cast<size_t>(2 * n);
+            writer = std::thread([&, q, write_n] {
+                write_ok = std::fwrite(q, esz, write_n, f) == write_n;
+            });
+            cur ^= 1;
         }
-        write_n = static_cast<size_t>(2 * n);
-        writer = std::thread([&, q, write_n] {
-            write_ok = std::fwrite(q, esz, write_n, f) == write_n;
-        });
-        cur ^= 1;
         done += n;
         if (progress)
             progress(static_cast<double>(done) /
                          static_cast<double>(b.total_samples),
                      user);
     }
-    if (writer.joinable()) {
-        writer.join();
-        if (!write_ok && rc == 0) rc = -2;
+    if (f) {
+        if (writer.joinable()) {
+            writer.join();
+            if (!write_ok && rc == 0) rc = -2;
+        }
+        std::fclose(f);
     }
-    std::fclose(f);
     return rc;
 }
 

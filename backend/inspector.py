@@ -28,6 +28,14 @@ def ca_code(prn: int) -> np.ndarray:
     return out
 
 
+def raw_to_iq(raw: np.ndarray) -> np.ndarray:
+    raw = raw[: len(raw) - (len(raw) % 2)]
+    out = np.empty(raw.size // 2, dtype=np.complex64)
+    out.real = raw[0::2]
+    out.imag = raw[1::2]
+    return out
+
+
 def read_iq(path, sample_format: str, max_samples: int | None = None,
             offset_samples: int = 0) -> np.ndarray:
     dtype = np.int8 if sample_format == "int8" else np.int16
@@ -35,13 +43,7 @@ def read_iq(path, sample_format: str, max_samples: int | None = None,
     count = -1 if max_samples is None else 2 * max_samples
     raw = np.fromfile(path, dtype=dtype, count=count,
                       offset=offset_samples * 2 * itemsize)
-    raw = raw[: len(raw) - (len(raw) % 2)]
-    # Fill the complex64 output in place: the old float32 copy plus a
-    # complex128 temporary tripled the peak on a multi-GB L5 capture.
-    out = np.empty(raw.size // 2, dtype=np.complex64)
-    out.real = raw[0::2]
-    out.imag = raw[1::2]
-    return out
+    return raw_to_iq(raw)
 
 
 def iq_sample_count(path, sample_format: str) -> int:
