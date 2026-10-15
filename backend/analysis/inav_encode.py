@@ -122,7 +122,22 @@ def deinterleave_30x8(sym: list[int]) -> list[int]:
 # word-type payloads (128 bits each incl. the 6-bit type)
 # --------------------------------------------------------------------------
 def _iodnav(eph: dict) -> int:
-    return int(_f(eph.get("iode", 0))) & 0x3FF
+    """Galileo IODnav türetimi (10 bit, 0-1023):
+    1. 'iodnav' alanı varsa öncelikli olarak kullan.
+    2. 'iode' alanı varsa (bazı RINEX ayrıştırıcıları buraya yazar) kullan.
+    3. İkisi de yoksa toe // 600 mod 1024 ile deterministik türet (Galileo OS SIS ICD Tablo 33).
+    """
+    for key in ("iodnav", "iode"):
+        val = eph.get(key)
+        if val is not None:
+            try:
+                v = float(val)
+                if not (math.isnan(v) or math.isinf(v)):
+                    return int(v) & 0x3FF
+            except (TypeError, ValueError):
+                pass
+    toe = _f(eph.get("toe"))
+    return int(toe // 600) & 0x3FF
 
 
 def sisa_index(metres) -> int:
