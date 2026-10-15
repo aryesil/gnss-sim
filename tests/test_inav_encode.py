@@ -21,13 +21,20 @@ def erec():
 
 def test_conv_encode_reference_vectors():
     assert I.conv_encode([1]) == [1, 0]
-    assert I.conv_encode([1, 0]) == [1, 0, 0, 0]
+    # G1=0o117, G2=0o155 (G2 tersli): [1, 0] girişi için t=0 -> [1, 0], t=1 -> [1, 1]
+    assert I.conv_encode([1, 0]) == [1, 0, 1, 1]
     assert I.conv_encode([0, 0, 0]) == [0, 1, 0, 1, 0, 1]     # G2 inverted
+
+
+def test_conv_encode_impulse_response():
+    """Giriş [1,0,0,0,0,0,0] için Galileo OS SIS ICD Section 4.1.3 impulse yanıtı."""
+    expected = [1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0]
+    assert I.conv_encode([1, 0, 0, 0, 0, 0, 0]) == expected
 
 
 def test_conv_encode_is_invertible_on_a_clean_stream():
     rng = np.random.default_rng(0)
-    data = rng.integers(0, 2, 120).tolist()
+    data = rng.integers(0, 2, 240).tolist()
     assert I._viterbi_free_decode(I.conv_encode(data)) == data
 
 

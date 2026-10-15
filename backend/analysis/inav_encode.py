@@ -29,8 +29,11 @@ _PAGE_SYMS = 500                                  # 2 s nominal page
 _HALF_SYMS = 250
 _SC = math.pi                                     # semicircle <-> radian
 
-_G1 = 0o171
-_G2 = 0o133
+# Galileo OS SIS ICD Bölüm 4.1.3: G1 = 0o171, G2 = 0o133 (G2 terslenir).
+# Standart polinomlar MSB=en-yeni bit kuralındadır. Koddaki yazmaçta ((reg << 1) | b) ile
+# en yeni bit LSB'de olduğundan 7-bit zaman tersi polinomlar kullanılır: G1=0o117, G2=0o155.
+_G1 = 0o117
+_G2 = 0o155
 _CRC24Q = 0x1864CFB
 
 
@@ -99,13 +102,18 @@ def conv_encode(data: list[int]) -> list[int]:
 
 
 def interleave_30x8(sym: list[int]) -> list[int]:
-    """Block interleaver: write 8 rows x 30 columns by rows, read by columns."""
+    """Blok serpiştirici (Galileo OS SIS ICD Bölüm 4.1.4):
+    ICD: 30 satır x 8 sütun, sütun sütun yazılır, satır satır okunur.
+    Cebirsel olarak reshape(8, 30).T.reshape(240) ile k' = 8*(k mod 30) + floor(k/30)
+    permütasyonu birebir aynıdır (satır-sütun transpozu).
+    """
     assert len(sym) == 240
     a = np.asarray(sym).reshape(8, 30)
     return a.T.reshape(240).tolist()
 
 
 def deinterleave_30x8(sym: list[int]) -> list[int]:
+    """Ters blok serpiştirici: 30 satır x 8 sütun okuma/yazma permütasyonunun tersi."""
     a = np.asarray(sym).reshape(30, 8)
     return a.T.reshape(240).tolist()
 

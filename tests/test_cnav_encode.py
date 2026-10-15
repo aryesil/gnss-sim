@@ -22,7 +22,8 @@ def gps_rec():
 
 def test_conv_encode_reference_vectors():
     assert C._Conv().encode([1]) == [1, 0]
-    assert C._Conv().encode([1, 0]) == [1, 0, 0, 0]
+    # G1=0o117, G2=0o155 (G2 tersli): [1, 0] girişi için t=0 -> [1, 0], t=1 -> [1, 1]
+    assert C._Conv().encode([1, 0]) == [1, 0, 1, 1]
     assert C._Conv().encode([0, 0, 0]) == [0, 1, 0, 1, 0, 1]
 
 

@@ -36,8 +36,11 @@ from backend.analysis import _fnav_layout as L
 from backend.analysis._crc import crc24q
 
 _PREAMBLE = [1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0]     # 12 uncoded symbols
-_G1 = 0o171
-_G2 = 0o133
+# Galileo OS SIS ICD Bölüm 4.2.3: G1 = 0o171, G2 = 0o133 (G2 terslenir).
+# Koddaki ((reg << 1) | b) yazmacında en yeni bit LSB'de olduğundan,
+# 7-bit zaman tersi polinomlar kullanılır: G1 = 0o117, G2 = 0o155.
+_G1 = 0o117
+_G2 = 0o155
 _SC = math.pi                                          # semicircle <-> radian
 
 
@@ -91,13 +94,18 @@ def conv_encode(data: list[int]) -> list[int]:
 
 
 def interleave_8x61(sym: list[int]) -> list[int]:
-    """Block interleaver: write 8 rows x 61 columns by rows, read by columns."""
+    """Blok serpiştirici (Galileo OS SIS ICD Bölüm 4.2.3):
+    ICD: 61 satır x 8 sütun, sütun sütun yazılır, satır satır okunur.
+    Cebirsel olarak reshape(8, 61).T.reshape(488) ile k' = 8*(k mod 61) + floor(k/61)
+    permütasyonu birebir aynıdır (satır-sütun transpozu).
+    """
     assert len(sym) == L.CODED_SYMS
     a = np.asarray(sym).reshape(8, 61)
     return a.T.reshape(L.CODED_SYMS).tolist()
 
 
 def deinterleave_8x61(sym: list[int]) -> list[int]:
+    """Ters blok serpiştirici: 61 satır x 8 sütun okuma/yazma permütasyonunun tersi."""
     a = np.asarray(sym).reshape(61, 8)
     return a.T.reshape(L.CODED_SYMS).tolist()
 

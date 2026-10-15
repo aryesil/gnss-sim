@@ -22,9 +22,10 @@ import numpy as np
 _G1 = 0o117  # 73  (0b1001111)
 _G2 = 0o155  # 109 (0b1101101)
 
-# G2 terslemeli miras modlar (Galileo I/NAV, GPS CNAV, F/NAV) için polinomlar:
-_G1_INV = 0o171  # 121 (0b1111001)
-_G2_INV = 0o133  # 91  (0b1011011)
+# G2 terslemeli modlar (Galileo I/NAV, GPS CNAV, F/NAV) için polinomlar:
+# Standart 171_8 ve 133_8 polinomlarının LSB=en-yeni yazmaç için 7-bit zaman tersi.
+_G1_INV = 0o117  # 73  (0b1001111)
+_G2_INV = 0o155  # 109 (0b1101101)
 
 
 def _parity(x: int) -> int:
