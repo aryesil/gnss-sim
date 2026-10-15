@@ -61,6 +61,13 @@ def test_transmit_forbidden_without_confirm(monkeypatch):
     assert r.status_code == 403
 
 
+def test_transmit_forbidden_without_allow_tx(monkeypatch):
+    monkeypatch.setattr(appmod.config, "ALLOW_TX", False)
+    r = client.post("/api/transmit", json={"iq_path": "/x/g.bin", "sample_rate": 2.6e6,
+                                           "sample_format": "int16", "confirm_isolated": True})
+    assert r.status_code == 403
+
+
 def test_generate_refuses_when_disk_too_small(monkeypatch):
     monkeypatch.setattr(appmod, "download_free_bytes", lambda p: 1000)
     r = client.post("/api/generate", json={

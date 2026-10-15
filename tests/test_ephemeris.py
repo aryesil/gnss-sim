@@ -127,3 +127,21 @@ def test_parse_rinex_keeps_records_with_blank_spare_fields(tmp_path):
     p.write_text("\n".join(lines) + "\n")
     eph = ephemeris.parse_rinex(p)
     assert eph[8]["toe"] == pytest.approx(475200.0)      # the noon record survived
+
+
+def test_download_formats_all_mirror_templates(monkeypatch):
+    seen_urls = []
+
+    def fake_get(url, timeout=30):
+        seen_urls.append(url)
+        raise ephemeris.requests.RequestException("simulated network off")
+
+    monkeypatch.setattr(ephemeris.requests, "get", fake_get)
+    date = dt.date(2026, 9, 3)
+    ephemeris._download(date)
+    assert len(seen_urls) == len(ephemeris.config.RINEX_MIRRORS)
+    for u in seen_urls:
+        assert "2026" in u
+        assert "246" in u  # DOY for 2026-09-03
+        assert "{" not in u and "}" not in u  # all templates resolved
+

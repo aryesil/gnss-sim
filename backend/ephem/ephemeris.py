@@ -223,8 +223,9 @@ def save_uploaded_rinex(date: dt.date, raw: bytes) -> pathlib.Path:
 
 def _download(date: dt.date) -> pathlib.Path | None:
     ddd = f"{date.timetuple().tm_yday:03d}"
+    yy = f"{date.year % 100:02d}"
     for tmpl in config.RINEX_MIRRORS:
-        url = tmpl.format(yyyy=date.year, ddd=ddd)
+        url = tmpl.format(yyyy=date.year, ddd=ddd, yy=yy)
         try:
             r = requests.get(url, timeout=30)
             r.raise_for_status()
