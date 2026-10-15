@@ -73,7 +73,20 @@ def _resolve_band_file(outdir) -> str:
 def _generate_segment(seg_req, iq_filename):
     """One live segment's IQ (module-level so a worker process can run it).
     Returns (iq, band file name)."""
-    outdir = signal_engine.run(seg_req)
+    res = signal_engine.run(seg_req)
+    if isinstance(res, dict):
+        if iq_filename is None:
+            if len(res) > 1:
+                raise RuntimeError(
+                    "live transmit supports exactly one RF output per channel, but "
+                    f"this systems/bands selection produced {len(res)}: "
+                    f"{list(res.keys())!r} -- pick a single band for Start Now")
+            iq_filename = next(iter(res.keys()))
+        raw = res[iq_filename]
+        iq = inspector.raw_to_iq(raw)
+        return (iq, iq_filename)
+
+    outdir = res
     try:
         if iq_filename is None:
             # A systems/bands combination needing >1 physical output is a
@@ -104,8 +117,7 @@ class LiveSession:
         self.consecutive_errors = 0
         self._iq_filename: str | None = None   # resolved from the first segment
         self._pool = None
-        self._scratch_dir = config.OUT_DIR / f".live_{id(self)}_{int(dt.datetime.now().timestamp())}"
-        self._scratch_dir.mkdir(parents=True, exist_ok=True)
+        self._scratch_dir = None
 
     def jog(self, direction: str, distance_m: float) -> None:
         if direction not in _ENU_DIRECTIONS:
@@ -145,7 +157,7 @@ class LiveSession:
             start=base.start + dt.timedelta(seconds=t),
             duration_s=seg, route=None, engine="native",
             eph_epoch=base.start + dt.timedelta(seconds=block),
-            outdir=getattr(self, "_scratch_dir", None),
+            in_memory=True,
             skip_meta=True)
 
     def _make_segment(self, k: int, snap: LiveState):
@@ -233,12 +245,12 @@ class LiveSession:
             self.running = False
             if self._pool is not None:
                 self._pool.shutdown(wait=False, cancel_futures=True)
-            if hasattr(self, "_scratch_dir") and self._scratch_dir.exists():
+            if getattr(self, "_scratch_dir", None) and self._scratch_dir.exists():
                 shutil.rmtree(self._scratch_dir, ignore_errors=True)
 
     def stop(self) -> None:
         self.running = False
-        if hasattr(self, "_scratch_dir") and self._scratch_dir.exists():
+        if getattr(self, "_scratch_dir", None) and self._scratch_dir.exists():
             shutil.rmtree(self._scratch_dir, ignore_errors=True)
 
     def snapshot(self) -> dict:

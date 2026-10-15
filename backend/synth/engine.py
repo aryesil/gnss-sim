@@ -770,12 +770,17 @@ def run(req, progress_cb=None) -> pathlib.Path:
     """
     _lib.load_lib()
 
-    created = dt.datetime.now(dt.timezone.utc)
-    if getattr(req, "outdir", None) is not None:
-        outdir = pathlib.Path(req.outdir)
+    in_memory = bool(getattr(req, "in_memory", False))
+    if in_memory:
+        outdir = None
+        mem_buffers = {}
     else:
-        outdir = config.OUT_DIR / created.strftime("%Y%m%dT%H%M%S%f")
-    outdir.mkdir(parents=True, exist_ok=True)
+        created = dt.datetime.now(dt.timezone.utc)
+        if getattr(req, "outdir", None) is not None:
+            outdir = pathlib.Path(req.outdir)
+        else:
+            outdir = config.OUT_DIR / created.strftime("%Y%m%dT%H%M%S%f")
+        outdir.mkdir(parents=True, exist_ok=True)
 
     systems = tuple(getattr(req, "systems", None) or ("G",))
     warnings: list[str] = []
@@ -1272,8 +1277,16 @@ def run(req, progress_cb=None) -> pathlib.Path:
             continue
         total_samples = int(round(plan.fs * req.duration_s))
         bs = _lib.BandSpec()
-        _lib.fill_band(bs, outdir / plan.out_file, plan.fs, plan.quant,
-                       total_samples, sv_list, block_samples=_BLOCK_SAMPLES)
+        if in_memory:
+            raw_dtype = np.int8 if req.sample_format == "int8" else np.int16
+            raw_buf = np.empty(total_samples * 2, dtype=raw_dtype)
+            _lib.fill_band(bs, None, plan.fs, plan.quant,
+                           total_samples, sv_list, block_samples=_BLOCK_SAMPLES,
+                           out_mem=raw_buf)
+            mem_buffers[plan.out_file] = raw_buf
+        else:
+            _lib.fill_band(bs, outdir / plan.out_file, plan.fs, plan.quant,
+                           total_samples, sv_list, block_samples=_BLOCK_SAMPLES)
         band_specs.append(bs)
         meta_bands.append({
             "id": plan.id, "centre_hz": plan.centre_hz, "fs": plan.fs,
@@ -1292,6 +1305,9 @@ def run(req, progress_cb=None) -> pathlib.Path:
     rc = _lib.run_bands(band_specs, cb)
     if rc != 0:
         raise RuntimeError(f"synth_run_bands failed ({rc})")
+
+    if in_memory:
+        return mem_buffers
 
     # Composite-signal models, per band file, streamed (see postproc):
     # multipath under models_to_iq like the gps-sdr-sim path, then the RF

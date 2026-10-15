@@ -6,7 +6,7 @@ import sys
 
 import numpy as np
 
-ABI_VERSION = 29
+ABI_VERSION = 30
 _NATIVE_DIR = pathlib.Path(__file__).parent / "native"
 if sys.platform == "darwin":
     _EXT = "dylib"
@@ -128,6 +128,7 @@ class BandSpec(ctypes.Structure):
         ("nthreads", ctypes.c_int),
         ("svs", ctypes.POINTER(SvSpec)),
         ("nsv", ctypes.c_int),
+        ("out_mem", ctypes.POINTER(ctypes.c_uint8)),
     ]
 
 
@@ -175,7 +176,7 @@ def one_sv_spec(code, carrier_hz=0.0, code_phase0=0.0, code_doppler=0.0,
 
 
 def fill_band(bandspec, path, fs, quant, total_samples, sv_list,
-              block_samples=65536, nthreads=0):
+              block_samples=65536, nthreads=0, out_mem=None):
     """Populate `bandspec` (a `_lib.BandSpec`) in place from `sv_list` (a list of
     `_lib.SvSpec`). A `(SvSpec * n)` array is built and both it and the SvSpec
     code buffers are stashed on the struct (``._svs_keep`` / ``._sv_list``) so
@@ -183,7 +184,7 @@ def fill_band(bandspec, path, fs, quant, total_samples, sv_list,
     `bandspec`."""
     n = len(sv_list)
     arr = (SvSpec * n)(*sv_list)
-    bandspec.out_path = str(path).encode()
+    bandspec.out_path = str(path).encode() if path is not None else None
     bandspec.fs = float(fs)
     bandspec.quant = int(quant)
     bandspec.dither = 0
@@ -192,6 +193,12 @@ def fill_band(bandspec, path, fs, quant, total_samples, sv_list,
     bandspec.nthreads = int(nthreads)
     bandspec.svs = ctypes.cast(arr, ctypes.POINTER(SvSpec))
     bandspec.nsv = n
+    if out_mem is not None:
+        bandspec.out_mem = ctypes.cast(out_mem.ctypes.data, ctypes.POINTER(ctypes.c_uint8))
+        bandspec._out_mem_keep = out_mem
+    else:
+        bandspec.out_mem = None
+        bandspec._out_mem_keep = None
     bandspec._svs_keep = arr        # keep the (SvSpec*n) array alive
     bandspec._sv_list = list(sv_list)  # keep the source structs (code bufs) alive
     return bandspec

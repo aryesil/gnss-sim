@@ -229,7 +229,7 @@ int synth_run(const char *path, const RunSpec *rs,
 // One band == one interleaved-IQ output file. Field order frozen -- _lib.py
 // mirrors it exactly.
 typedef struct {
-    const char *out_path;      // one file per band
+    const char *out_path;      // one file per band (or NULL if out_mem != NULL)
     double   fs;
     int      quant;            // 0 int8, 1 int12, 2 int16 (same as RunSpec)
     int      dither;
@@ -238,6 +238,7 @@ typedef struct {
     int      nthreads;
     const SvSpec *svs;         // this band's channels
     int      nsv;
+    uint8_t *out_mem;          // ABI 30: in-memory destination buffer (NULL for file output)
 } BandSpec;
 // Streams one interleaved-IQ file per band (bands[0..nband-1]). Progress is
 // forwarded per band as fraction 0..1 over that band's own sample count; with
