@@ -161,44 +161,44 @@ def sisa_index(metres) -> int:
 def word_type_1(eph, tow):
     b = bits_of(1, 6) + bits_of(_iodnav(eph), 10)
     b += bits_of(int(round(_f(eph.get("toe")) / 60.0)) & 0x3FFF, 14)
-    b += bits_of(twos(eph.get("m0") / _SC, 2 ** -31, 32), 32)
-    b += bits_of(uns(eph.get("e"), 2 ** -33, 32), 32)
-    b += bits_of(uns(eph.get("sqrtA"), 2 ** -19, 32), 32)
+    b += bits_of(twos(_f(eph.get("m0")) / _SC, 2 ** -31, 32), 32)
+    b += bits_of(uns(_f(eph.get("e")), 2 ** -33, 32), 32)
+    b += bits_of(uns(_f(eph.get("sqrtA")), 2 ** -19, 32), 32)
     b += [0, 0]
     return b
 
 
 def word_type_2(eph, tow):
     b = bits_of(2, 6) + bits_of(_iodnav(eph), 10)
-    b += bits_of(twos(eph.get("omega0") / _SC, 2 ** -31, 32), 32)
-    b += bits_of(twos(eph.get("i0") / _SC, 2 ** -31, 32), 32)
-    b += bits_of(twos(eph.get("omega") / _SC, 2 ** -31, 32), 32)
-    b += bits_of(twos(eph.get("idot") / _SC, 2 ** -43, 14), 14)
+    b += bits_of(twos(_f(eph.get("omega0")) / _SC, 2 ** -31, 32), 32)
+    b += bits_of(twos(_f(eph.get("i0")) / _SC, 2 ** -31, 32), 32)
+    b += bits_of(twos(_f(eph.get("omega")) / _SC, 2 ** -31, 32), 32)
+    b += bits_of(twos(_f(eph.get("idot")) / _SC, 2 ** -43, 14), 14)
     b += [0, 0]
     return b
 
 
 def word_type_3(eph, tow):
     b = bits_of(3, 6) + bits_of(_iodnav(eph), 10)
-    b += bits_of(twos(eph.get("omega_dot") / _SC, 2 ** -43, 24), 24)
-    b += bits_of(twos(eph.get("delta_n") / _SC, 2 ** -43, 16), 16)
-    b += bits_of(twos(eph.get("cuc"), 2 ** -29, 16), 16)
-    b += bits_of(twos(eph.get("cus"), 2 ** -29, 16), 16)
-    b += bits_of(twos(eph.get("crc"), 2 ** -5, 16), 16)
-    b += bits_of(twos(eph.get("crs"), 2 ** -5, 16), 16)
+    b += bits_of(twos(_f(eph.get("omega_dot")) / _SC, 2 ** -43, 24), 24)
+    b += bits_of(twos(_f(eph.get("delta_n")) / _SC, 2 ** -43, 16), 16)
+    b += bits_of(twos(_f(eph.get("cuc")), 2 ** -29, 16), 16)
+    b += bits_of(twos(_f(eph.get("cus")), 2 ** -29, 16), 16)
+    b += bits_of(twos(_f(eph.get("crc")), 2 ** -5, 16), 16)
+    b += bits_of(twos(_f(eph.get("crs")), 2 ** -5, 16), 16)
     b += bits_of(sisa_index(eph.get("sisa")), 8)             # SISA(E1,E5b)
     return b
 
 
 def word_type_4(eph, tow):
     b = bits_of(4, 6) + bits_of(_iodnav(eph), 10)
-    b += bits_of(int(eph.get("prn", 0)) & 0x3F, 6)
-    b += bits_of(twos(eph.get("cic"), 2 ** -29, 16), 16)
-    b += bits_of(twos(eph.get("cis"), 2 ** -29, 16), 16)
+    b += bits_of(int(_f(eph.get("prn", 0))) & 0x3F, 6)
+    b += bits_of(twos(_f(eph.get("cic")), 2 ** -29, 16), 16)
+    b += bits_of(twos(_f(eph.get("cis")), 2 ** -29, 16), 16)
     b += bits_of(int(round(_f(eph.get("toc")) / 60.0)) & 0x3FFF, 14)
-    b += bits_of(twos(eph.get("af0"), 2 ** -34, 31), 31)
-    b += bits_of(twos(eph.get("af1"), 2 ** -46, 21), 21)
-    b += bits_of(twos(eph.get("af2"), 2 ** -59, 6), 6)
+    b += bits_of(twos(_f(eph.get("af0")), 2 ** -34, 31), 31)
+    b += bits_of(twos(_f(eph.get("af1")), 2 ** -46, 21), 21)
+    b += bits_of(twos(_f(eph.get("af2")), 2 ** -59, 6), 6)
     b += [0, 0]
     return b
 

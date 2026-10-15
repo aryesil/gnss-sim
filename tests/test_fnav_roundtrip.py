@@ -36,6 +36,18 @@ def test_message_frames_survive_crc(gal_rec):
     assert all(m["prn"] == prn for m in msgs if m["crc_ok"] and m["type"] == 1)
 
 
+def test_fnav_word1_sisa_decoded(gal_rec):
+    """F/NAV Word 1 içindeki SISA alanının çözücü tarafından doğru çıkarılması."""
+    prn = gal_rec["prn"]
+    arr, _ = F.nav_stream(gal_rec, prn, 1325, _SOW, 60)
+    msgs = D.decode_messages(_sym01(arr))
+    w1_msgs = [m for m in msgs if m["crc_ok"] and m["type"] == 1]
+    assert len(w1_msgs) > 0
+    w1 = w1_msgs[0]
+    assert "sisa" in w1["fields"]
+    assert w1["fields"]["sisa"] == F.sisa_index(gal_rec.get("sisa"))
+
+
 def test_ephemeris_reconstruction_roundtrip(gal_rec):
     prn = gal_rec["prn"]
     arr, _ = F.nav_stream(gal_rec, prn, 1325, _SOW, 60)
