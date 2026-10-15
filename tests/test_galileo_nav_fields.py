@@ -86,3 +86,19 @@ def test_pick_epoch_reads_the_galileo_and_beidou_week_fields():
     # BeiDou: BDTWeek = GPS week - 1356, toe on BDT (GPS - 14 s)
     sub = _records("BDTWeek", week - 1356, [172_800.0, 176_400.0, 255_600.0])
     assert float(ephemeris._pick_epoch(sub, target, "C")["Toe"]) == 176_400.0
+
+
+def test_iodnav_derivation():
+    """Galileo OS SIS ICD Table 33: IODnav türetim önceliği ve toe fallback'i."""
+    from backend.analysis import inav_encode, fnav_encode
+
+    for mod in (inav_encode, fnav_encode):
+        # 1. 'iodnav' öncelikli
+        assert mod._iodnav({"iodnav": 123, "iode": 456, "toe": 561600.0}) == 123
+        # 2. 'iode' varsa
+        assert mod._iodnav({"iode": 456, "toe": 561600.0}) == 456
+        # 3. İkisi de yoksa: toe // 600 mod 1024 (561600 // 600 = 936)
+        assert mod._iodnav({"toe": 561600.0}) == 936
+        # 4. 10-bit maske
+        assert mod._iodnav({"iodnav": 2047}) == 1023
+
