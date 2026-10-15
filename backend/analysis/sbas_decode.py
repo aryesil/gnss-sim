@@ -248,22 +248,51 @@ def parse_type25(data_bits: list[int]) -> dict[str, Any]:
 
 
 def parse_type9(data_bits: list[int]) -> dict[str, Any]:
-    """Parse Message Type 9 (GEO Navigation Message) 212-bit data field."""
-    iodn = _u(data_bits, 0, 8)
-    x_m = float(_s(data_bits, 8, 30)) * _POS
-    y_m = float(_s(data_bits, 38, 30)) * _POS
-    z_m = float(_s(data_bits, 68, 25)) * _POS
-    vx = float(_s(data_bits, 93, 17)) * _VEL
-    vy = float(_s(data_bits, 110, 17)) * _VEL
-    vz = float(_s(data_bits, 127, 18)) * _VEL
-    ax = float(_s(data_bits, 145, 10)) * _ACC
-    ay = float(_s(data_bits, 155, 10)) * _ACC
-    az = float(_s(data_bits, 165, 10)) * _ACC
+    """Parse Message Type 9 (GEO Navigation Message) 212-bit data field.
+    Supports both RTCA DO-229 Table A-8 standard framing and legacy mock framing.
+    """
+    # Detect standard RTCA DO-229 Table A-8 (X_G at bit 25..54, Y_G at 55..84, Z_G at 85..109)
+    # Standard geostationary orbit radius is ~4.2164e7 m (3.5e7 <= R <= 4.5e7 m) and t_0 <= 5400.
+    t0_cand = _u(data_bits, 8, 13) if len(data_bits) >= 21 else 9999
+    r_std = math.hypot(
+        _s(data_bits, 25, 30) * 0.08,
+        _s(data_bits, 55, 30) * 0.08,
+        _s(data_bits, 85, 25) * 0.4,
+    ) if len(data_bits) >= 110 else 0.0
+    is_standard_do229 = (t0_cand <= 5400 and 3.5e7 <= r_std <= 4.5e7)
 
-    t0 = float(_u(data_bits, 175, 13)) * 16.0 if len(data_bits) >= 188 else 0.0
-    urai = _u(data_bits, 188, 4) if len(data_bits) >= 192 else 0
-    af0 = float(_s(data_bits, 192, 12)) * (2.0 ** -31) if len(data_bits) >= 204 else 0.0
-    af1 = float(_s(data_bits, 204, 8)) * (2.0 ** -40) if len(data_bits) >= 212 else 0.0
+    if is_standard_do229:
+        # Standard RTCA DO-229 Table A-8 format
+        iodn = _u(data_bits, 0, 8)
+        t0 = float(t0_cand) * 16.0
+        urai = _u(data_bits, 21, 4)
+        x_m = float(_s(data_bits, 25, 30)) * 0.08
+        y_m = float(_s(data_bits, 55, 30)) * 0.08
+        z_m = float(_s(data_bits, 85, 25)) * 0.4
+        vx = float(_s(data_bits, 110, 17)) * 0.000625
+        vy = float(_s(data_bits, 127, 17)) * 0.000625
+        vz = float(_s(data_bits, 144, 18)) * 0.004
+        ax = float(_s(data_bits, 162, 10)) * 0.0000125
+        ay = float(_s(data_bits, 172, 10)) * 0.0000125
+        az = float(_s(data_bits, 182, 10)) * 0.0000625
+        af0 = float(_s(data_bits, 192, 12)) * (2.0 ** -31)
+        af1 = float(_s(data_bits, 204, 8)) * (2.0 ** -40)
+    else:
+        # Legacy mock format (sbas_encode._type9_data)
+        iodn = _u(data_bits, 0, 8)
+        x_m = float(_s(data_bits, 8, 30)) * _POS
+        y_m = float(_s(data_bits, 38, 30)) * _POS
+        z_m = float(_s(data_bits, 68, 25)) * _POS
+        vx = float(_s(data_bits, 93, 17)) * _VEL
+        vy = float(_s(data_bits, 110, 17)) * _VEL
+        vz = float(_s(data_bits, 127, 18)) * _VEL
+        ax = float(_s(data_bits, 145, 10)) * _ACC
+        ay = float(_s(data_bits, 155, 10)) * _ACC
+        az = float(_s(data_bits, 165, 10)) * _ACC
+        t0 = float(_u(data_bits, 175, 13)) * 16.0 if len(data_bits) >= 188 else 0.0
+        urai = _u(data_bits, 188, 4) if len(data_bits) >= 192 else 0
+        af0 = float(_s(data_bits, 192, 12)) * (2.0 ** -31) if len(data_bits) >= 204 else 0.0
+        af1 = float(_s(data_bits, 204, 8)) * (2.0 ** -40) if len(data_bits) >= 212 else 0.0
 
     return {
         "iodn": iodn,

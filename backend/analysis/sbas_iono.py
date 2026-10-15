@@ -7,7 +7,7 @@ Maintains DO-229 continuous rate-1/2 convolutional FEC at 500 sym/s.
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from typing import Sequence, Any
 
 import numpy as np
 
@@ -344,6 +344,91 @@ def build_type25_block(idx: int,
     data = encode_type25(sat_corrections, iodp=iodp)
     head = pre + _bits_of(25, 6) + data
     return head + sbas_encode.crc24q(head)
+ 
+ 
+def encode_type9(eph: dict[str, Any], tow_s: float = 0.0, iodn: int = 0, urai: int = 0) -> list[int]:
+    """Build 212-bit data field for Message Type 9 (GEO Navigation Message)
+    strictly compliant with RTCA DO-229 Table A-8 / ICAO Annex 10.
+
+    Fields:
+    - IODN: 8 bits (0..255)
+    - t_0,GEO: 13 bits (Time of day count in 16 s units, 0..5399)
+    - URAI: 4 bits (0 = healthy, sigma <= 2.4 m; 15 = unhealthy / do not use)
+    - X_G: 30 bits, scale 0.08 m
+    - Y_G: 30 bits, scale 0.08 m
+    - Z_G: 25 bits, scale 0.4 m
+    - X_dot_G: 17 bits, scale 0.000625 m/s
+    - Y_dot_G: 17 bits, scale 0.000625 m/s
+    - Z_dot_G: 18 bits, scale 0.004 m/s
+    - X_ddot_G: 10 bits, scale 0.0000125 m/s^2
+    - Y_ddot_G: 10 bits, scale 0.0000125 m/s^2
+    - Z_ddot_G: 10 bits, scale 0.0000625 m/s^2
+    - a_Gf0: 12 bits, scale 2^-31 s
+    - a_Gf1: 8 bits, scale 2^-40 s/s
+    Total: exactly 212 bits.
+    """
+    b = []
+    # 1. IODN: 8 bits
+    i_val = int(eph.get("iodn", iodn) or 0) & 0xFF
+    b.extend(_bits_of(i_val, 8))
+
+    # 2. t_0,GEO: 13 bits (0..5399)
+    t0_s = eph.get("t0", eph.get("toe_ref", tow_s))
+    try:
+        t0_val = (int(float(t0_s)) % 86400) // 16
+    except Exception:
+        t0_val = 0
+    t0_val = max(0, min(5399, t0_val))
+    b.extend(_bits_of(t0_val, 13))
+
+    # 3. URAI: 4 bits (0 = healthy, sigma <= 2.4 m; 15 = unhealthy / do not use)
+    u_val = int(eph.get("urai", urai) or 0) & 0x0F
+    b.extend(_bits_of(u_val, 4))
+
+    # 4. Position: X (30b, 0.08m), Y (30b, 0.08m), Z (25b, 0.4m)
+    x_m = float(eph.get("x_m", 0.0) or 0.0)
+    y_m = float(eph.get("y_m", 0.0) or 0.0)
+    z_m = float(eph.get("z_m", 0.0) or 0.0)
+    if math.hypot(x_m, y_m) > 1e8:
+        x_m *= 1e-3
+        y_m *= 1e-3
+        z_m *= 1e-3
+    b.extend(sbas_encode.twos(x_m, 0.08, 30))
+    b.extend(sbas_encode.twos(y_m, 0.08, 30))
+    b.extend(sbas_encode.twos(z_m, 0.4, 25))
+
+    # 5. Velocity: VX (17b, 0.000625 m/s), VY (17b, 0.000625 m/s), VZ (18b, 0.004 m/s)
+    vx = float(eph.get("vx", 0.0) or 0.0)
+    vy = float(eph.get("vy", 0.0) or 0.0)
+    vz = float(eph.get("vz", 0.0) or 0.0)
+    if math.hypot(vx, vy) > 1e5:
+        vx *= 1e-3
+        vy *= 1e-3
+        vz *= 1e-3
+    b.extend(sbas_encode.twos(vx, 0.000625, 17))
+    b.extend(sbas_encode.twos(vy, 0.000625, 17))
+    b.extend(sbas_encode.twos(vz, 0.004, 18))
+
+    # 6. Acceleration: AX (10b, 0.0000125 m/s^2), AY (10b, 0.0000125 m/s^2), AZ (10b, 0.0000625 m/s^2)
+    b.extend(sbas_encode.twos(eph.get("ax", 0.0), 0.0000125, 10))
+    b.extend(sbas_encode.twos(eph.get("ay", 0.0), 0.0000125, 10))
+    b.extend(sbas_encode.twos(eph.get("az", 0.0), 0.0000625, 10))
+
+    # 7. Clock: af0 (12b, 2^-31 s), af1 (8b, 2^-40 s/s)
+    af0_s = eph.get("af0", eph.get("tau", 0.0))
+    af1_s = eph.get("af1", eph.get("gamma", 0.0))
+    b.extend(sbas_encode.twos(af0_s, 2.0 ** -31, 12))
+    b.extend(sbas_encode.twos(af1_s, 2.0 ** -40, 8))
+
+    return b[:212]
+
+
+def build_type9_block(idx: int, eph: dict[str, Any], tow_s: float = 0.0) -> list[int]:
+    """Build full 250-bit Message Type 9 block with preamble and CRC-24Q."""
+    pre = _bits_of(_PREAMBLES[idx % 3], 8)
+    data = encode_type9(eph, tow_s=tow_s)
+    head = pre + _bits_of(9, 6) + data
+    return head + sbas_encode.crc24q(head)
 
 
 
@@ -483,9 +568,9 @@ def nav_stream(eph: dict, week: int, tow0_sow: float, duration_s: float,
     for i in range(nblk):
         k = k0 + i
         sec = k % 10
-        cycle = (k - k0) // 10
+        cycle = k // 10
         if sec == 0:
-            blk = sbas_encode.build_block(k, 9, eph)
+            blk = build_type9_block(k, eph, tow_s=float(k))
         elif sec == 1:
             blk = blk_mt1(k)
         elif sec in (2, 6, 9):
