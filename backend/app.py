@@ -1244,11 +1244,16 @@ def start_transmit(body: dict, request: Request):
 
             th = threading.Thread(target=_stream_worker)
             th.start()
+            last_ping = time.monotonic()
             while th.is_alive() or q:
                 while q:
                     yield f"data: {json.dumps({**q.pop(0), 'slot': slot})}\n\n"
                 if _tx_slots[slot]["stop"].is_set():
                     break
+                now = time.monotonic()
+                if now - last_ping >= 1.0:
+                    yield ": ping\n\n"
+                    last_ping = now
                 th.join(timeout=0.2)
             th.join(timeout=2.0)
             if err:
@@ -1598,11 +1603,13 @@ def live_start(body: dict, request: Request):
                     recorder.append(payload)
                 return f"data: {json.dumps(payload)}\n\n"
 
+            last_ping = time.monotonic()
             timeline_idx = 0
             while th.is_alive() or q:
                 while q:
                     yield emit({**q.pop(0), "slot": slot})
-                elapsed = time.monotonic() - started
+                now = time.monotonic()
+                elapsed = now - started
                 while timeline_idx < len(timeline) and timeline[timeline_idx]["at_s"] <= elapsed:
                     step = timeline[timeline_idx]
                     try:
@@ -1618,6 +1625,9 @@ def live_start(body: dict, request: Request):
                     _tx_slots[slot]["stop"].set()  # fail-safe: auto-stop after max_duration_s
                     audit.log_event("auto_stop_timeout", slot=slot, max_duration_s=max_duration_s)
                     break
+                if now - last_ping >= 1.0:
+                    yield ": ping\n\n"
+                    last_ping = now
                 th.join(timeout=0.2)
             _tx_slots[slot]["stop"].set()
             if session:
@@ -1732,6 +1742,19 @@ def live_stop(body: dict, request: Request):
             occ["session"].stop()
         audit.log_event("manual_stop", slot=slot)
     return {"stopped": True}
+
+
+@app.get("/api/live/status")
+def live_status(request: Request):
+    auth.require_viewer_or_operator(request)
+    with _tx_slots_lock:
+        return {
+            slot: {
+                "active": occ is not None and not occ["stop"].is_set(),
+                "has_session": occ is not None and occ.get("session") is not None,
+            }
+            for slot, occ in _tx_slots.items()
+        }
 
 
 @app.post("/api/trajectory/save")
