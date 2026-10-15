@@ -771,7 +771,10 @@ def run(req, progress_cb=None) -> pathlib.Path:
     _lib.load_lib()
 
     created = dt.datetime.now(dt.timezone.utc)
-    outdir = config.OUT_DIR / created.strftime("%Y%m%dT%H%M%S%f")
+    if getattr(req, "outdir", None) is not None:
+        outdir = pathlib.Path(req.outdir)
+    else:
+        outdir = config.OUT_DIR / created.strftime("%Y%m%dT%H%M%S%f")
     outdir.mkdir(parents=True, exist_ok=True)
 
     systems = tuple(getattr(req, "systems", None) or ("G",))
@@ -1363,5 +1366,6 @@ def run(req, progress_cb=None) -> pathlib.Path:
         },
         "bands": meta_bands,
     }
-    (outdir / "meta.json").write_text(json.dumps(meta, indent=2))
+    if not getattr(req, "skip_meta", False):
+        (outdir / "meta.json").write_text(json.dumps(meta, indent=2))
     return outdir

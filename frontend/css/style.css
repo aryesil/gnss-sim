@@ -68,6 +68,9 @@ button.btn-primary, #btn-add-channel, #btn-start-all, .modal-actions #confirm-mo
 button.btn-primary:hover, #btn-add-channel:hover, #btn-start-all:hover { background: var(--accent-strong); }
 button.btn-danger, #confirm-modal-ok { background: var(--danger); border-color: var(--danger); color: #fff; }
 button.btn-danger:disabled, #confirm-modal-ok:disabled { background: var(--surface-2); border-color: var(--border-strong); color: var(--text-faint); cursor: not-allowed; }
+button.btn-warning { background: #d97706; border-color: #d97706; color: #fff; }
+button.btn-warning:hover { background: #b45309; border-color: #b45309; }
+button.btn-warning:disabled { background: var(--surface-2); border-color: var(--border-strong); color: var(--text-faint); cursor: not-allowed; }
 button.btn-secondary { background: transparent; }
 
 /* top-level RF status bar -- always visible, never subtle */
