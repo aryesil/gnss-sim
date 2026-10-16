@@ -144,6 +144,8 @@ def decode_messages(sym01: list[int] | np.ndarray) -> list[dict[str, Any]]:
                     odd_part = stream[i + L.HALF_PAGE_SYMS : i + L.PAGE_SYMS]
                     page = decode_page(even_part, odd_part)
                     if page is not None and page["crc_ok"]:
+                        # Akış içindeki sembol başlangıç indeksi (zamanlama doğrulaması için)
+                        page["sym_idx"] = i
                         msgs.append(page)
                         i += L.PAGE_SYMS
                         continue
