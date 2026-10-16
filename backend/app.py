@@ -112,6 +112,8 @@ def _validate_native_request(body: dict) -> tuple[str, list[str], list[str] | No
     if not isinstance(systems, list) or not all(
             isinstance(s, str) and s in signals.SYSTEMS for s in systems):
         raise HTTPException(422, f"systems: unknown entry in {systems!r}")
+    if not systems:
+        raise HTTPException(422, "systems: must be non-empty")
     if engine != "native" and sorted(set(systems)) != ["G"]:
         raise HTTPException(422,
             "gps-sdr-sim is GPS-only; use engine=native for other systems")
@@ -440,7 +442,9 @@ def _preview_multi(body: dict, start: dt.datetime, rx,
 
     path = _resolve_rinex(body, start)
     try:
-        eph = ephemeris.parse_rinex_multi(path, systems, require=("G",))
+        # GPS zorunlu değil: Talep edilen sistemler arasında 'G' varsa 'G' zorunlu tutulur, yoksa boş demet verilir
+        req_require = tuple(s for s in ("G",) if s in systems)
+        eph = ephemeris.parse_rinex_multi(path, systems, require=req_require)
     except ephemeris.EphemerisUnavailable as e:
         raise HTTPException(422, f"ephemeris: {e}")
     eph = ephemeris.align_epochs(eph, week, sow)

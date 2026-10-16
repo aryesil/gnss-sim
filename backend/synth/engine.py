@@ -960,10 +960,10 @@ def run(req, progress_cb=None) -> pathlib.Path:
                 a_dt = req.eph_epoch + dt.timedelta(
                     seconds=config.GPS_UTC_LEAP_S)
                 a_week, a_sow = ephemeris.gps_week_and_sow(a_dt)
-            # Each satellite's record nearest the run (not the file's
-            # midday), so a same-day RINEX yields the REAL ephemeris.
+            # GPS zorunlu değil: Talep edilen sistemler arasında 'G' varsa 'G' aranır, yoksa boş demet verilir
+            req_req = tuple(s for s in ("G",) if s in systems)
             eph = ephemeris.parse_rinex_multi(req.rinex_path, systems,
-                                              require=("G",), at_gps=a_dt)
+                                              require=req_req, at_gps=a_dt)
             got = {(k[0] if isinstance(k, tuple) else "G") for k in eph}
             dropped = [s for s in systems if s not in got]
             if dropped:
