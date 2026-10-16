@@ -349,4 +349,5 @@ def nav_stream(eph: dict, week: int, tow0_sow: float, duration_s: float,
         wtype = _CYCLE[(tow // 2) % len(_CYCLE)]
         syms.extend(build_page(wtype, eph, tow, week))
     a = np.asarray(syms, dtype=np.int8)
-    return np.where(a > 0, np.int8(1), np.int8(-1)).astype(np.int8)
+    # BPSK eşlemesi: bit 0 -> +1, bit 1 -> -1 (tüm GNSS standartları ve E1-C pilot evresiyle uyumlu)
+    return np.where(a > 0, np.int8(-1), np.int8(1)).astype(np.int8)
