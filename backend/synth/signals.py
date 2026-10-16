@@ -87,7 +87,8 @@ def glo_channel_offset_hz(k: int, step_hz: float = 562_500.0) -> float:
     """GLONASS FDMA channel offset for channel index k.
 
     Args:
-        k: Channel index in range [-7, 6]
+        k: Channel index in range [-7, 7] (operasyonel kanallar -7..+6,
+           ayrıca GLONASS ICD Bölüm 3.1.1 teknik/test kanalı +7).
         step_hz: per-channel spacing -- 562.5 kHz on G1 (L1OF, the default,
             every existing caller's value), 437.5 kHz on G2 (L2OF).
 
@@ -95,8 +96,8 @@ def glo_channel_offset_hz(k: int, step_hz: float = 562_500.0) -> float:
         Channel offset in Hz: k * step_hz
 
     Raises:
-        ValueError: If k is not in [-7, 6]
+        ValueError: If k is not in [-7, 7]
     """
-    if k not in range(-7, 7):
-        raise ValueError(f"k must be in range [-7, 6], got {k}")
+    if k not in range(-7, 8):
+        raise ValueError(f"k must be in range [-7, 7], got {k}")
     return k * step_hz

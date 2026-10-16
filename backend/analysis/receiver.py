@@ -485,7 +485,7 @@ def _fix_from_iq_glo_l2of(iq_path, sample_format, sample_rate, eph_by_prn,
                 if marker_llh else np.zeros(3))
 
     acq = {}
-    for k in range(-7, 7):
+    for k in range(-7, 8):
         off_hz = _sig.glo_channel_offset_hz(k, step_hz=_GLO_G2_STEP_HZ)
         r = band_acquire.acquire(iq, sample_rate, code, chip_hz=_GLO_CHIP_HZ,
                                  code_len=_GLO_CODE_LEN, center_hz=off_hz,
