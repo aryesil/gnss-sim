@@ -87,6 +87,14 @@ def nav_stream_for(sysc, signal, eph, header, week, sow, duration_s,
                                             eph_by_prn=eph_by_prn)
         return arr, rate
     if sysc == "E":
+        toe = eph.get("toe", 0) or 0
+        toc = eph.get("toc", 0) or 0
+        if toe % 60 != 0 or toc % 60 != 0:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Galileo toe=%s veya toc=%s I/NAV 60 saniye kuantalama ızgarasında değil; "
+                "alıcı yörüngeyi yanlış hesaplayabilir.", toe, toc
+            )
         arr = inav_encode.nav_stream(eph, week - GST_WEEK_OFFSET, sow,
                                      duration_s,
                                      eph_by_prn=eph_by_prn)
