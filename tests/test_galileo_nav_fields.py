@@ -23,7 +23,8 @@ def _eph():
 
 
 def _words(arr):
-    syms = [1 if s > 0 else 0 for s in arr]
+    # Standart BPSK: sembol -1 -> bit 1, sembol +1 -> bit 0
+    syms = [1 if s < 0 else 0 for s in arr]
     out = {}
     for p in range(len(syms) // 500):
         wtype, word = inav_encode.decode_word(syms[p * 500:(p + 1) * 500])
