@@ -404,6 +404,9 @@ window.addChannel = function () {
     };
   });
   document.getElementById(`${id}-remove`).onclick = () => {
+    if (window._liveChannels?.has(id)) {
+      disableLiveTabs(id);
+    }
     delete _channels[id];
     card.remove();
   };
@@ -438,7 +441,7 @@ function wireChannelActions(id) {
     const bytes = 2 * bytesPerSample * rate * duration;
     const rates = (auto && st.autoFs)
       ? ' (auto: ' + Object.entries(st.autoFs)
-          .map(([b, f]) => `${b} ${(f / 1e6).toFixed(f % 1e6 ? 3 : 0).replace(/\.?0+$/, '')} MSPS`)
+          .map(([b, f]) => `${b} ${(f / 1e6).toFixed(f % 1e6 ? 3 : 0).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '')} MSPS`)
           .join(', ') + ')'
       : '';
     document.getElementById(`${id}-size-estimate`).textContent =
@@ -1010,6 +1013,9 @@ function wireChannelActions(id) {
   document.getElementById(`${id}-btn-generate`).onclick = () => {
     const su = document.getElementById(`${id}-start-utc`).value;
     if (!su) return alert('set a start UTC');
+    // Haritadan konum seçilmediyse lat/lon sessizce 0,0 (Gine Körfezi) olurdu;
+    // uzun bir üretimi boşa harcamamak için Start ile aynı şekilde engelle.
+    if (!st.map.latlng()) return alert('click the map to set a start position first');
     document.getElementById(`${id}-gen-progress`).value = 0;
     document.getElementById(`${id}-warnings`).textContent = '';
     const body = {
@@ -1105,10 +1111,15 @@ function wireChannelActions(id) {
     const badge = document.getElementById(`${id}-badge`);
 
     // File Transmit: transmits the generated file directly via DMA streaming
+    const fsVal = document.getElementById(`${id}-fs`)?.value;
+    const quantVal = document.getElementById(`${id}-quant`)?.value;
+    const fmtVal = document.getElementById(`${id}-fmt`)?.value;
+    const isAutoRate = document.getElementById(`${id}-rate`)?.value === 'auto';
+    const hasOutdir = Boolean(st.lastOutdir || st.outdir);
+
     const fileBody = {
-      outdir: st.lastOutdir,
-      sample_rate: _rateValue() || 2600000,
-      sample_format: document.getElementById(`${id}-fmt`).value || 'int16',
+      outdir: st.lastOutdir || st.outdir,
+      sample_format: (quantVal && quantVal !== 'int16') ? quantVal : (fmtVal || quantVal || 'int16'),
       uri: document.getElementById(`${id}-uri`).value,
       kind: document.getElementById(`${id}-kind`).value,
       lo_hz: Number(document.getElementById(`${id}-lo`).value),
@@ -1117,6 +1128,9 @@ function wireChannelActions(id) {
       confirm_isolated: document.getElementById(`${id}-tx-confirm`).checked,
       dry_run: document.getElementById(`${id}-tx-dryrun`).checked,
     };
+    if (!(hasOutdir && isAutoRate)) {
+      fileBody.sample_rate = (fsVal ? Number(fsVal) : undefined) || _rateValue() || 2600000;
+    }
     const r = await fetch('/api/transmit', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fileBody),
     });
@@ -1257,6 +1271,10 @@ function wireChannelActions(id) {
         if (msg.spectrogram_db) pushSpectrogramColumn(`${id}-spectrogram`, msg.spectrogram_db);
         if (msg.cn0_db !== undefined) pushCn0Sample(`${id}-cn0-trend`, msg.cn0_db);
         if (msg.timeline_step) logLine(`Channel ${id} timeline: ${JSON.stringify(msg.timeline_step)}`, 'info');
+        if (msg.lead_report) {
+          const lr = msg.lead_report;
+          logLine(`Channel ${id} Start Now: first segment ready in ${lr.ready_s}s (lead ${lr.lead_s}s, on-air GPS time ${lr.lag_s > 0 ? 'lags' : 'leads'} real time by ${Math.abs(lr.lag_s)}s)`, Math.abs(lr.lag_s) > 0.5 ? 'warn' : 'info');
+        }
         if (msg.finished) {
           badge.textContent = 'STOPPED'; badge.classList.remove('badge-live'); disableLiveTabs(id);
           if (document.getElementById(`${id}-record`).checked) _refreshReplayOptions();

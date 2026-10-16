@@ -1,6 +1,6 @@
 # backend/synth/native/Makefile
 CXX ?= c++
-CXXFLAGS := -std=c++20 -O3 -ffast-math -fno-math-errno -Wall -Wextra -fPIC
+CXXFLAGS := -std=c++20 -O3 -march=native -mavx2 -mfma -flto -ffast-math -fno-math-errno -fno-trapping-math -Wall -Wextra -fPIC
 ifeq ($(OS),Windows_NT)
   CXXFLAGS += -D_USE_MATH_DEFINES
   LIBEXT := dll

@@ -25,10 +25,11 @@ import math
 import numpy as np
 
 from backend.analysis import _navic_layout as L
+from backend.analysis import _viterbi
 from backend.analysis._crc import crc24q
 
-_G1 = 0o171
-_G2 = 0o133
+_G1 = 0o117
+_G2 = 0o155
 _SC = math.pi                                # semicircle -> radian
 
 
@@ -112,6 +113,13 @@ def find_subframes(sym01) -> list[dict]:
                 continue
             coded = _deinterleave(stream[i + L.SYNC_BITS:i + step])
             body = viterbi_free_decode(coded)
+            if (len(body) != L.SUBFRAME_BITS or
+                    crc24q(body[:L.HEADER_BITS + L.DATA_BITS]) !=
+                    body[L.HEADER_BITS + L.DATA_BITS:
+                         L.HEADER_BITS + L.DATA_BITS + L.CRC_BITS]):
+                body = _viterbi.viterbi_decode(
+                    coded, invert_g2=True, known_start_state=0, end_state=0
+                )
             if len(body) != L.SUBFRAME_BITS:
                 i += 1
                 continue

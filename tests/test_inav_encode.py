@@ -40,8 +40,23 @@ def test_conv_encode_is_invertible_on_a_clean_stream():
 
 def test_interleaver_permutation():
     il = I.interleave_30x8(list(range(240)))
-    assert il[:5] == [0, 30, 60, 90, 120]
+    # ICD 4.1.4: 8 satır x 30 sütun, sütun sütun yaz / satır satır oku
+    # -> satır 0 = c[0], c[8], c[16], ... (bağımsız GNSS-SDR deinterleaver formu)
+    assert il[:5] == [0, 8, 16, 24, 32]
+    assert il[30:32] == [1, 9]
     assert I.deinterleave_30x8(il) == list(range(240))
+
+
+def test_interleaver_matches_receiver_form():
+    """Alıcı formu out[c*8+r] = in[r*30+c] verici çıkışını geri çözmeli.
+    Encoder/decoder simetrik yanlışını yakalayan bağımsız kontrol."""
+    c = list(range(240))
+    il = I.interleave_30x8(c)
+    out = [0] * 240
+    for r in range(8):
+        for col in range(30):
+            out[col * 8 + r] = il[r * 30 + col]
+    assert out == c
 
 
 def test_page_layout_and_crc(erec):

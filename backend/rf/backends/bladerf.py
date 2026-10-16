@@ -64,6 +64,19 @@ def open_tx(uri: str, lo_hz: float, sample_rate: float, *,
     sample rate on either channel."""
     from bladerf import _bladerf
     dev = _bladerf.BladeRF(device_identifier=uri)
+    # Kenetlenme/yapılandırma hatasında cihaz tutamacı açık kalırdı; sonraki
+    # açılış "device busy" ile düşerdi. Hata yolunda kapatılır.
+    try:
+        return _configure_tx(_bladerf, dev, lo_hz, sample_rate, rf_bandwidth_hz)
+    except Exception:
+        try:
+            close(dev)
+        except Exception:
+            pass
+        raise
+
+
+def _configure_tx(_bladerf, dev, lo_hz, sample_rate, rf_bandwidth_hz):
     for idx in (0, 1):
         ch = dev.Channel(_bladerf.CHANNEL_TX(idx))
         ch.frequency = lo_hz
@@ -109,18 +122,16 @@ def write(handle, blocks) -> None:
     """blocks is [ch0_block, ch1_block], equal-length complex64 arrays --
     interleave into one SC16Q11 buffer (ch0_I, ch0_Q, ch1_I, ch1_Q per
     sample period) and push it."""
-    ch0, ch1 = (np.asarray(b, dtype=np.complex64) for b in blocks)
+    ch0, ch1 = (b if isinstance(b, np.ndarray) and b.dtype == np.complex64
+                else np.asarray(b, dtype=np.complex64) for b in blocks)
     n = len(ch0)
     interleaved = np.empty(n * 4, dtype=np.int16)
-    lim = DAC_FULL_SCALE
-
-    def q(x):
-        return np.clip(np.rint(x), -lim, lim).astype(np.int16)
-
-    interleaved[0::4] = q(ch0.real)
-    interleaved[1::4] = q(ch0.imag)
-    interleaved[2::4] = q(ch1.real)
-    interleaved[3::4] = q(ch1.imag)
+    tmp = np.empty(n, dtype=np.float32)
+    lim = float(DAC_FULL_SCALE)
+    for k, rail in enumerate((ch0.real, ch0.imag, ch1.real, ch1.imag)):
+        np.rint(rail, out=tmp)
+        np.clip(tmp, -lim, lim, out=tmp)
+        np.copyto(interleaved[k::4], tmp, casting="unsafe")
     handle.sync_tx(interleaved.tobytes(), n)
 
 

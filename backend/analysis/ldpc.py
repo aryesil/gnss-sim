@@ -40,6 +40,8 @@ data, self-consistent round trip.
 """
 from __future__ import annotations
 
+import numpy as np
+
 MSG_BITS = 288
 PARITY_BITS = 288
 CODE_BITS = MSG_BITS + PARITY_BITS
@@ -69,6 +71,12 @@ def _build_parity_rows() -> list[tuple[int, ...]]:
 
 _ROWS = _build_parity_rows()
 
+# Precompute the 288 column syndromes for O(1) single-bit correction lookup
+_COL_SYNDROMES: dict[tuple[int, ...], int] = {
+    tuple(1 if _j in _ROWS[_i] else 0 for _i in range(PARITY_BITS)): _j
+    for _j in range(MSG_BITS)
+}
+
 
 def _parity(msg: list[int]) -> list[int]:
     out = [0] * PARITY_BITS
@@ -97,15 +105,17 @@ def decode(codeword) -> tuple[list[int], bool]:
         raise ValueError(f"ldpc.decode expects {CODE_BITS} bits, got {len(cw)}")
     msg = cw[:MSG_BITS]
     rx_parity = cw[MSG_BITS:]
-    if _parity(msg) == rx_parity:
+    comp_parity = _parity(msg)
+    syn = tuple(c ^ r for c, r in zip(comp_parity, rx_parity))
+    if int(np.count_nonzero(syn)) <= 1:
+        # Handles 0 errors or single parity bit error where message is error-free
         return msg, True
-    # Bounded single-bit-flip search: try flipping each message bit and
-    # recheck. O(MSG_BITS) parity recomputes -- cheap, and sufficient to
-    # correct an isolated bit error (Gallager-B style, simplified for a
-    # clean channel that essentially never needs it).
-    for i in range(MSG_BITS):
-        trial = list(msg)
-        trial[i] ^= 1
-        if _parity(trial) == rx_parity:
-            return trial, True
+
+    # O(1) single message bit error correction lookup
+    if syn in _COL_SYNDROMES:
+        corr = list(msg)
+        corr[_COL_SYNDROMES[syn]] ^= 1
+        return corr, True
+
     return msg, False
+

@@ -113,6 +113,9 @@ PRECISE_SP3_ULTRA_MIRRORS = [
     if m.strip()]
 
 ALLOW_TX = _flag("ALLOW_TX", False)
+# Uydu başına sabit genlik için referans kanal sayısı (0 = kapalı, bileşik
+# seviye 0.25*FS/sqrt(nsv) ile sabitlenir). Bkz. synth/engine.py.
+SIM_NSV_REF = _float("SIM_NSV_REF", 0.0)
 RF_FRONTEND_ENABLED = _flag("RF_FRONTEND_ENABLED", False)
 DEVICE_URI = _str("DEVICE_URI", "ip:192.168.3.1")
 # Measured reference-oscillator error of the TX SDR in ppm (see
@@ -123,6 +126,13 @@ DEVICE_XO_PPM = _float("DEVICE_XO_PPM", 0.0)
 # the antenna (first-segment generation + host/kernel TX buffering).
 # Measured 2.5 s on a LibreSDR (AD9361, USB) at 2.6 Msps.
 LIVE_START_LEAD_S = _float("LIVE_START_LEAD_S", 2.5)
+# Opt-in otomatik kalibrasyon (varsayılan KAPALI = yukarıdaki sabit değer).
+# Açıkken her oturum ilk segmentin hazır olma gecikmesini ölçüp DATA_DIR'e
+# yazar; aynı cihaz/hız/sistem/bant için sonraki Start Now'ın öncü süresi
+# medyan ölçüm + TX tamponu + LIVE_START_LEAD_MARGIN_S olur (backend/session/
+# lead_calib.py). Ölçüm yokken sabit değer kullanılır.
+LIVE_START_LEAD_AUTO = _flag("LIVE_START_LEAD_AUTO", False)
+LIVE_START_LEAD_MARGIN_S = _float("LIVE_START_LEAD_MARGIN_S", 0.3)
 DEFAULT_SAMPLE_RATE = _float("DEFAULT_SAMPLE_RATE", 2.6e6)
 DEFAULT_FORMAT = _str("DEFAULT_FORMAT", "int16")
 
@@ -135,9 +145,12 @@ def _api_keys() -> dict:
         return {}
     import json
     try:
-        return json.loads(raw)
+        keys = json.loads(raw)
     except json.JSONDecodeError:
         return {}
+    # {"anahtar": "rol"} dışı bir JSON (liste, sayı) auth.role_for_request'te
+    # AttributeError -> 500 verirdi.
+    return keys if isinstance(keys, dict) else {}
 
 API_KEYS = _api_keys()
 

@@ -38,8 +38,9 @@ _field = unpack_field
 
 
 def deinterleave_30x8(sym: Sequence[int] | np.ndarray) -> list[int]:
-    """Block deinterleaver: read 8 rows x 30 cols that were written by rows and read by cols."""
-    return deinterleave_block(sym, rows=30, cols=8)
+    """Blok ters-serpiştirici (ICD 4.1.4): 8 satır x 30 sütun; verici sütun sütun
+    yazıp satır satır okur, alıcı out[c*8+r] = in[r*30+c] ile geri alır."""
+    return deinterleave_block(sym, rows=8, cols=30)
 
 
 def viterbi_free_decode(coded: Sequence[int] | np.ndarray) -> list[int]:
@@ -155,6 +156,23 @@ def decode_messages(sym01: list[int] | np.ndarray) -> list[dict[str, Any]]:
     return []
 
 
+def sisa_metres(idx: int | float) -> float:
+    """Convert an 8-bit SISA(E1,E5b) index (OS SIS ICD Table 89) to metres.
+    Inverse of :func:`backend.analysis.inav_encode.sisa_index`."""
+    i = int(round(float(idx)))
+    if i < 0:
+        return 0.0
+    if i < 50:
+        return round(i * 0.01, 4)
+    if i < 75:
+        return round(0.50 + (i - 50) * 0.02, 4)
+    if i < 100:
+        return round(1.00 + (i - 75) * 0.04, 4)
+    if i <= 125:
+        return round(2.00 + (i - 100) * 0.16, 4)
+    return float("nan")
+
+
 def reconstruct_ephemeris(msgs: list[dict[str, Any]]) -> dict[str, Any]:
     """Reconstruct Galileo Keplerian ephemeris dictionary from CRC-valid I/NAV messages.
     Requires word types 1, 2, 3, 4. Word types 5 and 0 are used when available for
@@ -177,7 +195,8 @@ def reconstruct_ephemeris(msgs: list[dict[str, Any]]) -> dict[str, Any]:
     f5 = by_type.get(5, {})
     f0 = by_type.get(0, {})
 
-    rec: dict[str, Any] = {"system": "E"}
+    # I/NAV af0..af2 E1-E5b IF referanslıdır (OS SIS ICD 5.1.4).
+    rec: dict[str, Any] = {"system": "E", "clk_ref": "E5B"}
     rec["prn"] = int(f4["prn"])
     rec["iodnav"] = int(f1["iodnav"])
 
@@ -199,7 +218,7 @@ def reconstruct_ephemeris(msgs: list[dict[str, Any]]) -> dict[str, Any]:
     rec["crc"] = float(f3["crc"])
     rec["crs"] = float(f3["crs"])
     if "sisa" in f3:
-        rec["sisa"] = float(f3["sisa"])
+        rec["sisa"] = sisa_metres(f3["sisa"])
 
     # Harmonic corrections and clock
     rec["cic"] = float(f4["cic"])

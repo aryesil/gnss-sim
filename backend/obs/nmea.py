@@ -96,5 +96,5 @@ def parse(sentence: str) -> dict | None:
         return None
     try:
         return parser(sentence)
-    except NmeaError:
+    except (NmeaError, ValueError):
         return None

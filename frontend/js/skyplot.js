@@ -23,7 +23,7 @@ window.fitCanvas = function (c) {
 };
 
 let _lastSkyEntries = {};   // canvasId -> entries, for click-to-select (positions recomputed on click)
-const _SYS_COLOR = {G:'#06c', R:'#c30', E:'#093', C:'#c60', J:'#606', S:'#888'};
+const _SYS_COLOR = {G:'#06c', R:'#c30', E:'#093', C:'#c60', J:'#606', S:'#888', I:'#a3e635'};
 
 // cn0ByPrn (optional): {prn: metric_db} from the inspect step's acquire()
 // results -- colors each dot by measured signal strength instead of the
@@ -52,13 +52,15 @@ window.drawSkyplot = function (canvasId, entries, cn0ByPrn) {
 // Called once per card (from channels.js's addChannel()) rather than once
 // at module load, since each card gets its own skyplot canvas.
 window.attachSkyplotClickHandler = function (canvasId, prnInputId) {
-  document.getElementById(canvasId).addEventListener('click', (ev) => {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  canvas.addEventListener('click', (ev) => {
     const entries = _lastSkyEntries[canvasId];
     if (!entries || !entries.length) return;
-    const c = ev.target, rect = c.getBoundingClientRect();
-    const cx = c.width / 2, cy = c.height / 2, R = Math.min(cx, cy) - 10;
-    const mx = (ev.clientX - rect.left) * (c.width / rect.width);
-    const my = (ev.clientY - rect.top) * (c.height / rect.height);
+    const rect = canvas.getBoundingClientRect();
+    const cx = rect.width / 2, cy = rect.height / 2, R = Math.min(cx, cy) - 10;
+    const mx = ev.clientX - rect.left;
+    const my = ev.clientY - rect.top;
     let best = null, bestD = Infinity;
     entries.forEach(e => {
       const r = R * (1 - e.el_deg / 90), a = (e.az_deg - 90) * Math.PI / 180;

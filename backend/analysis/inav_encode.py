@@ -23,6 +23,8 @@ import math
 
 import numpy as np
 
+from backend.geometry import galileo_clock_shift_s
+
 SYNC_PATTERN = [0, 1, 0, 1, 1, 0, 0, 0, 0, 0]   # 10 symbols, even and odd
 SYM_RATE_HZ = 250.0
 _PAGE_SYMS = 500                                  # 2 s nominal page
@@ -103,18 +105,20 @@ def conv_encode(data: list[int]) -> list[int]:
 
 def interleave_30x8(sym: list[int]) -> list[int]:
     """Blok serpiştirici (Galileo OS SIS ICD Bölüm 4.1.4):
-    ICD: 30 satır x 8 sütun, sütun sütun yazılır, satır satır okunur.
-    Cebirsel olarak reshape(8, 30).T.reshape(240) ile k' = 8*(k mod 30) + floor(k/30)
-    permütasyonu birebir aynıdır (satır-sütun transpozu).
+    8 satır x 30 sütun matris; kodlanmış semboller SÜTUN sütun yazılır
+    (sütun i = c[8i..8i+7]), SATIR satır okunur: çıkış[j*30+i] = c[i*8+j].
+    Cebirsel karşılığı reshape(30, 8).T.reshape(240) (a[sütun, satır] transpozu).
+    Alıcı tarafı (GNSS-SDR): out[c*8+r] = in[r*30+c]. Önceki (8, 30) reshape
+    bu permütasyonun tersiydi; alıcıda hiçbir sayfanın CRC'si tutmuyordu.
     """
     assert len(sym) == 240
-    a = np.asarray(sym).reshape(8, 30)
+    a = np.asarray(sym).reshape(30, 8)
     return a.T.reshape(240).tolist()
 
 
 def deinterleave_30x8(sym: list[int]) -> list[int]:
-    """Ters blok serpiştirici: 30 satır x 8 sütun okuma/yazma permütasyonunun tersi."""
-    a = np.asarray(sym).reshape(30, 8)
+    """Ters blok serpiştirici: interleave_30x8'in tam tersi (alıcı yönü)."""
+    a = np.asarray(sym).reshape(8, 30)
     return a.T.reshape(240).tolist()
 
 
@@ -196,7 +200,9 @@ def word_type_4(eph, tow):
     b += bits_of(twos(_f(eph.get("cic")), 2 ** -29, 16), 16)
     b += bits_of(twos(_f(eph.get("cis")), 2 ** -29, 16), 16)
     b += bits_of(int(round(_f(eph.get("toc")) / 60.0)) & 0x3FFF, 14)
-    b += bits_of(twos(_f(eph.get("af0")), 2 ** -34, 31), 31)
+    # I/NAV af0 E1-E5b IF referanslıdır; kayıt F/NAV (E1-E5a) referanslıysa
+    # -Δ ile taşı (geometry.galileo_clock_shift_s), yoksa değişmez.
+    b += bits_of(twos(_f(eph.get("af0")) + galileo_clock_shift_s(eph, "E5B"), 2 ** -34, 31), 31)
     b += bits_of(twos(_f(eph.get("af1")), 2 ** -46, 21), 21)
     b += bits_of(twos(_f(eph.get("af2")), 2 ** -59, 6), 6)
     b += [0, 0]
@@ -205,6 +211,14 @@ def word_type_4(eph, tow):
 
 def word_type_5(eph, tow, week):
     b = bits_of(5, 6)
+    # ai0..ai2 BİLEREK 0: NeQuick-G efektif iyonizasyon düzeyi Az = ai0 + ai1*mu
+    # + ai2*mu^2. Simülatör E sinyaline iyonosfer gecikmesi enjekte etmiyor
+    # (engine._atmo_for, "enjekte edilen = yayından çıkarılabilen"); sıfır
+    # olmayan bir Az, NeQuick-G alıcısına sinyalde bulunmayan bir gecikmeyi
+    # düşürtüp pseudorange'i yanlı kılardı. Tutarlı sıfır olmayan değer ancak
+    # engine'e NeQuick-G (ICD Ek. E, ~1500 satır) gömüp ai'yi aynı Az'dan
+    # türeterek verilebilir; Klobuchar'dan türetmek alıcıdaki modelle
+    # uyuşmaz. Bkz. tests/synth/test_engine_iono_galileo.py.
     b += bits_of(0, 11) + bits_of(0, 11) + bits_of(0, 14)      # iono a_i0..2
     b += bits_of(0, 5)                                          # region flags
     bgd_b = eph.get("tgd", 0.0)

@@ -17,6 +17,7 @@ import math
 import numpy as np
 
 from backend.analysis import _cnav_layout as L
+from backend.analysis import _viterbi
 from backend.analysis._crc import crc24q
 
 _PREAMBLE = 0x8B
@@ -50,57 +51,13 @@ def viterbi_free_decode(sym) -> list[int]:
     return out
 
 
-def _viterbi_tables():
-    nxt = np.zeros((64, 2), dtype=np.int64)
-    out = np.zeros((64, 2, 2), dtype=np.int64)
-    for st in range(64):
-        for b in (0, 1):
-            r = ((st << 1) | b) & 0x7F
-            nxt[st, b] = r & 0x3F
-            out[st, b] = (_parity(r & _G1), _parity(r & _G2) ^ 1)
-    return nxt, out
-
-
-_NXT, _OUT = _viterbi_tables()
-
-
 def viterbi_decode(sym) -> list[int]:
     """Hard-decision Viterbi for the K=7 CNAV code (same convention as
     cnav_encode._Conv). Unlike :func:`viterbi_free_decode` it needs no known
     starting state: a capture begins mid-stream with the continuous encoder
     in an unknown state, so every state starts at metric 0. ``sym`` must
     start on a symbol-pair boundary; callers try both pair offsets."""
-    s = np.asarray([int(x) & 1 for x in sym], dtype=np.int64)
-    n = s.size // 2
-    if n == 0:
-        return []
-    pairs = s[:2 * n].reshape(n, 2)
-    metric = np.zeros(64)
-    # predecessor bookkeeping: for each step, best (prev state, bit) per state
-    prev = np.zeros((n, 64), dtype=np.int64)
-    bit = np.zeros((n, 64), dtype=np.int8)
-    src = np.repeat(np.arange(64), 2)
-    bsrc = np.tile([0, 1], 64)
-    dst = _NXT[src, bsrc]
-    for k in range(n):
-        cost = (metric[src]
-                + (_OUT[src, bsrc, 0] != pairs[k, 0])
-                + (_OUT[src, bsrc, 1] != pairs[k, 1]))
-        order = np.lexsort((cost, dst))            # by dst, then cost
-        first = np.ones(order.size, dtype=bool)
-        first[1:] = dst[order][1:] != dst[order][:-1]
-        win = order[first]
-        new = np.full(64, np.inf)
-        new[dst[win]] = cost[win]
-        prev[k, dst[win]] = src[win]
-        bit[k, dst[win]] = bsrc[win]
-        metric = new
-    st = int(np.argmin(metric))
-    bits = np.zeros(n, dtype=np.int8)
-    for k in range(n - 1, -1, -1):
-        bits[k] = bit[k, st]
-        st = int(prev[k, st])
-    return bits.tolist()
+    return _viterbi.viterbi_decode(sym, invert_g2=True, known_start_state=None)
 
 
 def _u(bits, lo, n):
@@ -409,7 +366,9 @@ def _demod(iq, fs, code, *, chip_hz, code_len, carrier_ctr_hz, dopp_hz,
         bt_s = (np.arange(nb) + 0.5) * B * sym_s
         c1, c0 = np.polyfit(bt_s, fblk, 1)
         d += float(c0)
-        p_full = _subcorr(d, float(c1))
+        t_sub = (np.arange(nsym, dtype=np.float64)[:, None]
+                 + (np.arange(m, dtype=np.float64)[None, :] + 0.5) / m) * sym_s
+        p_full = p_full * np.exp(-1j * (2.0 * np.pi * float(c0) * t_sub + np.pi * float(c1) * (t_sub ** 2)))
 
     # --- 3. residual carrier phase: low-order polyfit of the data-wiped
     # phase, de-rotated before the hard decision.

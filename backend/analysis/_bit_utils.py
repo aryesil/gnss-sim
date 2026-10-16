@@ -180,8 +180,8 @@ def normalize_symbols(
     arr = np.asarray(seq)
     if arr.size == 0:
         return []
-    unique = np.unique(arr)
-    if set(unique).issubset({-1, 1, -1.0, 1.0}):
+    unique = set(np.unique(arr))
+    if unique.issubset({-1, 1, -1.0, 1.0}) and ((-1 in unique) or (-1.0 in unique)):
         if bpsk_sign:
             return [(0 if x > 0 else 1) for x in arr]
         return [(1 if x > 0 else 0) for x in arr]

@@ -489,8 +489,9 @@ def nav_stream(eph: dict, week: int, tow0_sow: float, duration_s: float,
     if imap is None:
         # Simülasyon tarihini week ve tow0_sow'dan türet; week <= 0 veya yoksa
         # testlerde ağ erişimi yapılmaması için sentetik haritaya düş.
+        sow_iono = (float(tow0_sow) // 300.0) * 300.0
         if week is not None and week > 0:
-            target_dt = dt.datetime(1980, 1, 6, tzinfo=dt.timezone.utc) + dt.timedelta(weeks=week, seconds=float(tow0_sow))
+            target_dt = dt.datetime(1980, 1, 6, tzinfo=dt.timezone.utc) + dt.timedelta(weeks=week, seconds=sow_iono)
             imap = ionex.load_or_fetch_ionex(target_dt)
         else:
             imap = ionex.synthetic_ionex()
@@ -532,7 +533,7 @@ def nav_stream(eph: dict, week: int, tow0_sow: float, duration_s: float,
         b_mask_bits, b_active_indices = select_active_igps(b, ref_lat, ref_lon, radius_deg=18.0)
         band_masks[b] = b_mask_bits
         delays_b = [
-            imap.get_vertical_delay_m(all_b_igps[idx][0], all_b_igps[idx][1], tow0_sow)
+            imap.get_vertical_delay_m(all_b_igps[idx][0], all_b_igps[idx][1], sow_iono)
             for idx in b_active_indices
         ]
         gives_b = [3] * len(b_active_indices)

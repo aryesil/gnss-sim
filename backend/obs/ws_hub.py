@@ -36,17 +36,24 @@ def unregister(ws: WebSocket) -> None:
 
 
 async def _broadcast_async(payload: dict) -> None:
-    dead = []
-    for ws in list(_clients):
+    clients = list(_clients)
+    if not clients:
+        return
+
+    async def _send(ws: WebSocket):
         try:
             # A wedged or cross-loop client socket must never stall
             # delivery to the other operators (or the audit call that
             # triggered this) -- bound every send and drop on timeout.
             await asyncio.wait_for(ws.send_json(payload), timeout=2.0)
+            return None
         except Exception:
-            dead.append(ws)
-    for ws in dead:
-        _clients.discard(ws)
+            return ws
+
+    results = await asyncio.gather(*(_send(ws) for ws in clients), return_exceptions=True)
+    for r in results:
+        if isinstance(r, WebSocket):
+            _clients.discard(r)
 
 
 def broadcast(payload: dict) -> None:

@@ -260,6 +260,8 @@ Configured via environment variables (see `backend/config.py`):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ALLOW_TX` | `0` | Master switch for RF transmission. Set `1` to enable transmit endpoints. |
+| `LIVE_START_LEAD_S` | `2.5` | `Live: now` lead (s): how far ahead of the wall clock segment 0 is stamped. |
+| `LIVE_START_LEAD_AUTO` | `0` | Opt-in. When `1`, each session measures its first-segment latency (stored in `DATA_DIR/live_lead.json`) and the next `Live: now` for the same device/rate/systems/band uses median + TX buffer + `LIVE_START_LEAD_MARGIN_S` (default `0.3`). Every session reports `lead_report` (`lag_s` > 0 = on-air GPS time behind real time) in the SSE stream either way. |
 | `DEVICE_URI` | `ip:192.168.3.1` | Default SDR URI (`pyadi-iio` URI for PlutoSDR, bladeRF identifier for bladeRF). |
 | `RF_FRONTEND_ENABLED` | `0` | Enables LO-offset planning and automatic TX quadrature calibration. |
 | `DEFAULT_SAMPLE_RATE` | `2600000` | Default fallback sample rate in Hz. |
@@ -325,7 +327,7 @@ The test suite contains **880+ automated tests** covering:
 - **Continuous Live Progression:** In live in-memory mode (`Start Now`), time advances linearly forward indefinitely ($t = k \times 1.0\text{ s}$). The session does not loop, rewind, or wrap. Ephemeris blocks are refreshed seamlessly every 15 minutes to keep orbit parameters valid for receivers.
 - **Standards Compliance:**
   - **SBAS L1:** Implements RTCA DO-229 / ICAO Annex 10 standards: direct-form CRC-24Q, rate-1/2 FEC, 1-second preamble sync (0x53, 0x9A, 0xC6), MT 1/2/7/9/10/18/24/25/26 framing.
-  - **Galileo E1:** Implements Galileo OS SIS ICD Issue 2.0/2.1: time-reversed polynomial FEC (G1=0o117, G2=0o155 with inverted G2), BPSK symbol polarity (bit 0 $\to$ +1, bit 1 $\to$ −1), and structured I/NAV word mapping.
+  - **Galileo E1:** Implements Galileo OS SIS ICD Issue 2.0/2.1: time-reversed polynomial FEC (G1=0o117, G2=0o155 with inverted G2), BPSK symbol polarity (bit 0 $\to$ +1, bit 1 $\to$ −1), and structured I/NAV word mapping. The 250-symbol half-page interleaver is an 8-row × 30-column block (column-write / row-read, `out[j*30+i] = c[i*8+j]`). An I/NAV page lasts 2 s (1 s even + 1 s odd part). `af0..af2` are referenced to the E1-E5b combination in I/NAV and to E1-E5a in F/NAV (IF_a = IF_b + Δ, Δ = BGD(E1,E5a) − BGD(E1,E5b)); RINEX records carry a `clk_ref` tag (from `DataSrc`) and the generator/encoders apply Δ so dual-frequency E1/E5a receivers see a consistent clock. I/NAV word 5 `ai0..ai2` are 0 on purpose: no ionospheric delay is injected into Galileo signals.
   - **BeiDou B1I:** Implements BeiDou SIS ICD: D1 navigation framing, BCH (15,11,1) error correction, and NH20 secondary code modulation.
 - **Multi-GNSS Software Receiver Fix:** Built-in receiver performs code-phase pseudorange extraction, least-squares navigation positioning, and geodetic coordinate transformations on the WGS-84 ellipsoid normal.
 - **SDR Hardware Channels:** Up to two concurrent physical TX slots (`TX1`, `TX2`) supported on dual-channel SDR platforms.

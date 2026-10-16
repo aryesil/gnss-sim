@@ -59,3 +59,33 @@ def test_live_start_with_record_flag_creates_replayable_recording(monkeypatch):
 def test_recording_replay_unknown_name_404():
     r = client.get("/api/recording/replay?name=does-not-exist-xyz")
     assert r.status_code == 404
+
+
+def test_read_events_skips_a_truncated_last_line(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "OUT_DIR", tmp_path)
+    w = recording.RecordingWriter("TX1")
+    w.append({"progress": 1})
+    w.close()
+    with open(w.path, "a") as f:
+        f.write('{"t": 2.0, "progr')            # yarıda kesilmiş satır
+    assert [e["progress"] for e in recording.read_events(w.name)] == [1]
+
+
+def test_writer_survives_a_write_error_without_raising(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "OUT_DIR", tmp_path)
+    w = recording.RecordingWriter("TX1")
+
+    class _Full:
+        def write(self, *_):
+            raise OSError("disk full")
+        def flush(self): pass
+        def close(self): pass
+    w._f = _Full()
+    w.append({"a": 1})            # fırlatmamalı
+    w.append({"a": 2})            # kapalıyken no-op
+    w.close()
+
+
+def test_api_keys_non_dict_json_is_ignored(monkeypatch):
+    monkeypatch.setenv("API_KEYS_JSON", '["not", "a", "dict"]')
+    assert config._api_keys() == {}

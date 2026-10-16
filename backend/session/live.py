@@ -7,6 +7,7 @@ import datetime as dt
 import queue
 import shutil
 import threading
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -70,9 +71,16 @@ def _resolve_band_file(outdir) -> str:
     return present[0]
 
 
-def _generate_segment(seg_req, iq_filename):
-    """One live segment's IQ (module-level so a worker process can run it).
-    Returns (iq, band file name)."""
+def _seed_worker_cache(cache_snapshot: dict) -> None:
+    """Pre-seed the spawned worker process's RINEX parse cache so the first
+    segment never stalls on a cold georinex.load()."""
+    from backend.ephem import ephemeris
+    ephemeris._PARSE_CACHE.update(cache_snapshot)
+
+
+def _generate_segment_raw(seg_req, iq_filename):
+    """One live segment's raw or IQ data (module-level so a worker process can run it).
+    Returns (raw_or_iq, band file name, is_raw)."""
     res = signal_engine.run(seg_req)
     if isinstance(res, dict):
         if iq_filename is None:
@@ -82,9 +90,7 @@ def _generate_segment(seg_req, iq_filename):
                     f"this systems/bands selection produced {len(res)}: "
                     f"{list(res.keys())!r} -- pick a single band for Start Now")
             iq_filename = next(iter(res.keys()))
-        raw = res[iq_filename]
-        iq = inspector.raw_to_iq(raw)
-        return (iq, iq_filename)
+        return (res[iq_filename], iq_filename, True)
 
     outdir = res
     try:
@@ -95,10 +101,19 @@ def _generate_segment(seg_req, iq_filename):
             # budget on a request that can never succeed.
             iq_filename = _resolve_band_file(outdir)
         return (inspector.read_iq(outdir / iq_filename, seg_req.sample_format),
-                iq_filename)
+                iq_filename, False)
     finally:
         if getattr(seg_req, "outdir", None) is None:
             shutil.rmtree(outdir, ignore_errors=True)
+
+
+def _generate_segment(seg_req, iq_filename):
+    """One live segment's IQ (module-level so a worker process can run it).
+    Returns (iq, band file name)."""
+    data, iq_filename, is_raw = _generate_segment_raw(seg_req, iq_filename)
+    if is_raw:
+        return (inspector.raw_to_iq(data), iq_filename)
+    return (data, iq_filename)
 
 
 @dataclass
@@ -116,8 +131,25 @@ class LiveSession:
         self.running = False
         self.consecutive_errors = 0
         self._iq_filename: str | None = None   # resolved from the first segment
+        # Start Now öncü süre ölçümü (bkz. lead_calib): oturum nesnesi, uygulamanın
+        # "şimdi + lead" damgasından hemen sonra kurulur; ilk segment hazır
+        # olunca aradaki süre first_segment_latency_s'e yazılır.
+        self._created_mono = time.monotonic()
+        self.first_segment_latency_s: float | None = None
         self._pool = None
         self._scratch_dir = None
+        if base_req.nav_override is None and base_req.rinex_path:
+            import pathlib as _pathlib
+            if _pathlib.Path(base_req.rinex_path).is_file():
+                try:
+                    from backend.ephem import ephemeris
+                    systems = tuple(dict.fromkeys(getattr(base_req, "systems", None) or ("G",)))
+                    req_req = tuple(s for s in ("G",) if s in systems)
+                    a_dt = base_req.start + dt.timedelta(seconds=config.GPS_UTC_LEAP_S)
+                    ephemeris.parse_rinex_multi(base_req.rinex_path, systems,
+                                                require=req_req, at_gps=a_dt)
+                except Exception:
+                    pass
 
     def jog(self, direction: str, distance_m: float) -> None:
         if direction not in _ENU_DIRECTIONS:
@@ -175,9 +207,9 @@ class LiveSession:
         same 0.9 s forever -- a receiver saw time jump back every 0.9 s."""
         seg_req = self._segment_request(k, snap)
         if self._pool is not None:
-            iq, self._iq_filename = self._pool.submit(
-                _generate_segment, seg_req, self._iq_filename).result()
-            return iq
+            data, self._iq_filename, is_raw = self._pool.submit(
+                _generate_segment_raw, seg_req, self._iq_filename).result()
+            return inspector.raw_to_iq(data) if is_raw else data
         iq, self._iq_filename = _generate_segment(seg_req, self._iq_filename)
         return iq
 
@@ -199,8 +231,11 @@ class LiveSession:
         if self.use_process and self.base_req.nav_override is None:
             import concurrent.futures
             import multiprocessing
+            from backend.ephem import ephemeris
             self._pool = concurrent.futures.ProcessPoolExecutor(
-                max_workers=1, mp_context=multiprocessing.get_context("spawn"))
+                max_workers=1, mp_context=multiprocessing.get_context("spawn"),
+                initializer=_seed_worker_cache,
+                initargs=(dict(ephemeris._PARSE_CACHE),))
 
         def _producer():
             k = 0
@@ -210,6 +245,8 @@ class LiveSession:
                 try:
                     iq = self._make_segment(k, snap)
                     self.consecutive_errors = 0
+                    if k == 0 and self.first_segment_latency_s is None:
+                        self.first_segment_latency_s = time.monotonic() - self._created_mono
                 except RuntimeError as ex:
                     out.put(ex)
                     return

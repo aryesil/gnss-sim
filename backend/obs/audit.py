@@ -29,7 +29,9 @@ def log_event(event: str, **fields) -> None:
     /ws/events client (backend/ws_hub.py) -- the multi-operator view.
     Never raises -- a logging or broadcast failure must never take down
     or block an actual transmit."""
-    record = {"ts": dt.datetime.utcnow().isoformat() + "Z", "event": event, **fields}
+    # utcnow() Python 3.12'de deprecated; çıktı biçimi ("...Z", naive ISO) aynı.
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    record = {"ts": now.isoformat() + "Z", "event": event, **fields}
     try:
         with _lock:
             with open(config.LOG_DIR / "audit.jsonl", "a") as f:
@@ -39,15 +41,18 @@ def log_event(event: str, **fields) -> None:
     ws_hub.broadcast(record)
 
 
+import collections
+
+
 def read_events(limit: int = 200) -> list[dict]:
     """Most recent `limit` audit records, newest first."""
     path = config.LOG_DIR / "audit.jsonl"
     if not path.exists():
         return []
     with open(path) as f:
-        lines = f.readlines()
+        lines = collections.deque(f, maxlen=limit)
     out = []
-    for line in lines[-limit:]:
+    for line in lines:
         line = line.strip()
         if not line:
             continue

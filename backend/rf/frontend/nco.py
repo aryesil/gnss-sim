@@ -30,8 +30,11 @@ class NCOMixer:
         self._n = 0  # exact integer sample count seen so far
         freq_i = round(self._freq_hz)
         rate_i = round(self._sample_rate_hz)
-        g = math.gcd(abs(freq_i), rate_i) if rate_i else 0
-        self._period = (rate_i // g) if g else (rate_i or 1)
+        if self._freq_hz == freq_i and self._sample_rate_hz == rate_i and rate_i > 0:
+            g = math.gcd(abs(freq_i), rate_i)
+            self._period: int | None = (rate_i // g) if g else rate_i
+        else:
+            self._period = None
         self._cached_len: int | None = None
         self._cached_rotor: np.ndarray | None = None  # complex64, phase_step*k for k in 0..len-1
 
@@ -44,8 +47,10 @@ class NCOMixer:
 
     def mix(self, chunk: np.ndarray) -> np.ndarray:
         n = len(chunk)
-        n0 = self._n % self._period
-        origin = np.complex64(np.exp(1j * self._phase_step * n0))
+        n0 = self._n % self._period if self._period is not None else self._n
+        origin = np.complex64(np.exp(1j * ((self._phase_step * n0) % (2.0 * np.pi))))
         rotor = self._relative_rotor(n) * origin
         self._n += n
-        return (np.asarray(chunk) * rotor).astype(chunk.dtype)
+        arr = np.asarray(chunk)
+        out = arr * rotor
+        return out if out.dtype == arr.dtype else out.astype(arr.dtype)

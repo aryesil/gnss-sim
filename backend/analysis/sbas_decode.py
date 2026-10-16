@@ -383,7 +383,8 @@ def reconstruct_ephemeris(blocks: list[dict[str, Any]], prn: int | None = None,
 
     t0_val = t9.get("toe_ref", 0.0)
     if week_sow0 is not None:
-        toe_val = (float(week_sow0) // 86400.0) * 86400.0 + t0_val
+        d = (t0_val - (float(week_sow0) % 86400.0) + 43200.0) % 86400.0 - 43200.0
+        toe_val = float(week_sow0) + d
     else:
         toe_val = t0_val
 

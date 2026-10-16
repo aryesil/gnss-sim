@@ -72,7 +72,7 @@ def run_validation(req: scenario.ScenarioRequest, *, binary: str | None = None,
     t = truth.from_request(req)
     report: dict = {
         "scenario": t.as_dict(),
-        "created_utc": dt.datetime.utcnow().isoformat(),
+        "created_utc": dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat(),
         "stages": {s: _stage("skip") for s in _STAGES},
     }
     st = report["stages"]

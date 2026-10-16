@@ -53,6 +53,8 @@ class IonexMap:
 
         # --- Time interpolation
         sows = self.epochs_sow
+        if len(sows) > 1 and sow < sows[0] and sow + 604800.0 <= sows[-1]:
+            sow += 604800.0
         if len(sows) == 1 or sow <= sows[0]:
             t_idx0, t_idx1, wt = 0, 0, 0.0
         elif sow >= sows[-1]:
@@ -228,7 +230,9 @@ def parse_ionex(content: str | bytes | pathlib.Path) -> IonexMap:
                 lat_idx = int(round((lat1 - cur_lat) / abs(dlat)))
                 if 0 <= lat_idx < n_lat:
                     nv = min(n_lon, len(cur_row_vals))
-                    cur_map[lat_idx, :nv] = np.array(cur_row_vals[:nv], dtype=np.float32) * scale
+                    arr = np.array(cur_row_vals[:nv], dtype=np.float32)
+                    arr[arr == 9999.0] = 0.0
+                    cur_map[lat_idx, :nv] = arr * scale
                 cur_row_vals = []
             try:
                 # First token or fixed columns 2..8 contains the latitude
@@ -242,7 +246,8 @@ def parse_ionex(content: str | bytes | pathlib.Path) -> IonexMap:
         if cur_map is not None and cur_lat is not None:
             for token in line.split():
                 try:
-                    cur_row_vals.append(int(token))
+                    v = int(token)
+                    cur_row_vals.append(0 if v == 9999 else v)
                 except ValueError:
                     pass
 
@@ -251,7 +256,9 @@ def parse_ionex(content: str | bytes | pathlib.Path) -> IonexMap:
         lat_idx = int(round((lat1 - cur_lat) / abs(dlat)))
         if 0 <= lat_idx < n_lat:
             nv = min(n_lon, len(cur_row_vals))
-            cur_map[lat_idx, :nv] = np.array(cur_row_vals[:nv], dtype=np.float32) * scale
+            arr = np.array(cur_row_vals[:nv], dtype=np.float32)
+            arr[arr == 9999.0] = 0.0
+            cur_map[lat_idx, :nv] = arr * scale
 
     if not maps:
         # Fallback to single blank or synthetic map
@@ -259,8 +266,13 @@ def parse_ionex(content: str | bytes | pathlib.Path) -> IonexMap:
         epochs_sow = [0.0]
 
     tec_array = np.stack(maps, axis=0)
+    sows_arr = np.asarray(epochs_sow, dtype=np.float64)
+    if len(sows_arr) > 1 and sows_arr[-1] < sows_arr[0]:
+        for idx in range(1, len(sows_arr)):
+            if sows_arr[idx] < sows_arr[idx - 1]:
+                sows_arr[idx:] += 604800.0
     return IonexMap(
-        epochs_sow=np.asarray(epochs_sow, dtype=np.float64),
+        epochs_sow=sows_arr,
         lats=lats,
         lons=lons,
         tec=tec_array,

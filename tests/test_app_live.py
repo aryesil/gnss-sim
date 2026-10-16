@@ -602,3 +602,80 @@ def test_live_status_reports_slot_state():
     assert "TX1" in data and "TX2" in data
     assert isinstance(data["TX1"]["active"], bool)
     assert isinstance(data["TX1"]["has_session"], bool)
+
+
+def _live_body(**extra):
+    import pathlib
+    fixture = pathlib.Path(__file__).parent / "fixtures" / "brdc_sample.rnx"
+    return {"rinex_path": str(fixture), "lat": 41.0, "lon": 29.0, "alt": 100.0,
+            "start_utc": "2024-01-01T00:00:00", "confirm_isolated": True,
+            "dry_run": True, "duration_s": 3600, "max_duration_s": 0.05, **extra}
+
+
+@pytest.mark.parametrize("bad", [
+    {"timeline": [{"action": "jog"}]},               # at_s eksik
+    {"timeline": [{"at_s": "x", "action": "jog"}, {"at_s": 1, "action": "jog"}]},
+    {"max_duration_s": "abc"},
+])
+def test_live_start_bad_body_releases_the_tx_slot(monkeypatch, bad):
+    """Gövde ayrıştırması slot alındıktan sonra patlarsa slot sızmamalı:
+    aksi halde bir sonraki Start 'slot meşgul' (409) ile kilitlenir."""
+    monkeypatch.setattr(config, "ALLOW_TX", True)
+    from backend import app as app_module
+    r = client.post("/api/live/start", json=_live_body(**bad))
+    assert r.status_code in (422, 500)
+    assert app_module._tx_slots["TX1"] is None
+    assert app_module._tx_slots["TX2"] is None
+
+
+def test_live_start_accepts_tz_aware_start_utc(monkeypatch):
+    """Tarayıcı toISOString() 'Z' ekli gelir; naive UTC'ye çevrilmeli."""
+    monkeypatch.setattr(config, "ALLOW_TX", True)
+    from backend import app as app_module
+    r = client.post("/api/live/start",
+                    json=_live_body(start_utc="2024-01-01T03:00:00+03:00"))
+    assert r.status_code == 200
+    assert app_module._parse_utc("2024-01-01T03:00:00+03:00") == dt.datetime(2024, 1, 1, 0, 0, 0)
+    assert app_module._parse_utc("2024-01-01T00:00:00Z") == dt.datetime(2024, 1, 1)
+    assert app_module._parse_utc("2024-01-01T00:00:00") == dt.datetime(2024, 1, 1)
+
+
+def test_tee_spectrogram_drops_chunks_instead_of_growing_when_worker_is_slow():
+    import threading
+    gate = threading.Event()
+    seen = []
+
+    def slow_row(freqs, db):
+        gate.wait(5.0)
+        seen.append(1)
+
+    chunks = [np.ones(512, dtype=np.complex64) for _ in range(40)]
+    out = []
+    for c in _tee_spectrogram(iter(chunks), 2_600_000.0, slow_row):
+        out.append(c)
+        if len(out) == 40:
+            gate.set()
+    assert len(out) == 40            # TX yolu hiçbir parçayı kaybetmez
+    assert len(seen) < 40            # spektrogram kuyruğu sınırlı, fazlası düşer
+
+
+def test_live_start_now_reports_first_segment_lead(monkeypatch):
+    """Start Now ilk segment gecikmesini lead_report olarak yayınlar; AUTO
+    kapalıyken sabit LIVE_START_LEAD_S kullanılır ve geçmiş dosyası yazılmaz."""
+    import pathlib
+    monkeypatch.setattr(config, "ALLOW_TX", True)
+    monkeypatch.setattr(config, "LIVE_START_LEAD_AUTO", False)
+    fixture = pathlib.Path(__file__).parent / "fixtures" / "brdc_sample.rnx"
+    r = client.post("/api/live/start", json={
+        "rinex_path": str(fixture), "lat": 41.0, "lon": 29.0, "alt": 100.0,
+        "start_utc": "now", "confirm_isolated": True, "engine": "native",
+        "systems": ["G"], "sample_rate": 2.6e6, "dry_run": True,
+        "duration_s": 3600, "max_duration_s": 20})
+    assert r.status_code == 200
+    reports = [json.loads(l[6:])["lead_report"] for l in r.text.splitlines()
+               if l.startswith("data: ") and "lead_report" in l]
+    assert len(reports) == 1
+    rep = reports[0]
+    assert rep["lead_s"] == config.LIVE_START_LEAD_S and rep["auto"] is False
+    assert rep["ready_s"] > 0.0
+    assert rep["lag_s"] == pytest.approx(rep["ready_s"] + rep["tx_buffer_s"] - rep["lead_s"], abs=0.01)

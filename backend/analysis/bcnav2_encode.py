@@ -43,13 +43,16 @@ def _f(x) -> float:
     return 0.0 if math.isnan(v) or math.isinf(v) else v
 
 
-def _sat_type_for_prn(prn: int) -> int:
-    """1 (GEO) / 3 (MEO) per GNSS-SDR's sat_type encoding. This repo has no
-    separate IGSO PRN range (see geometry.py's _BDS_GEO_PRNS), so every
-    non-GEO PRN encodes as MEO (sat_type=3); geometry.py's own GEO/MEO
-    propagation split is driven by PRN + inclination, not by this field --
-    sat_type here only feeds A0 = a_ref(sat_type) + delta_a below."""
-    return 1 if int(prn) in _BDS_GEO_PRNS else 3
+def _sat_type_for_prn(prn: int, a0: float = 0.0) -> int:
+    """1 (GEO) / 2 (IGSO) / 3 (MEO) per GNSS-SDR's sat_type encoding.
+    GEO PRNs encode as sat_type=1; non-GEO orbits with semi-major axis
+    a0 > 35_000_000.0 m encode as IGSO (sat_type=2, A_REF_IGSO = 42_162_200.0);
+    otherwise MEO (sat_type=3, A_REF_MEO = 27_906_100.0)."""
+    if int(prn) in _BDS_GEO_PRNS:
+        return 1
+    if a0 > 35_000_000.0:
+        return 2
+    return 3
 
 
 def _write_field(bits: list[int], off: int, n: int, kind: str, scale, value) -> None:
@@ -68,9 +71,9 @@ def _write_field(bits: list[int], off: int, n: int, kind: str, scale, value) -> 
 
 
 def _values_mt10(eph: dict, prn: int, week: int) -> dict:
-    sat_type = _sat_type_for_prn(prn)
     a0 = eph.get("sqrtA", 0.0)
     a0 = _f(a0) ** 2 if a0 else 0.0
+    sat_type = _sat_type_for_prn(prn, a0)
     delta_a = a0 - L.a_ref_for(sat_type) if a0 else 0.0
     return {
         "wn": int(week) & 0x1FFF,

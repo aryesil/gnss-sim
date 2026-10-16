@@ -60,6 +60,10 @@ class EphemerisFitError(RuntimeError):
     tolerance (or a satellite had no usable precise samples)."""
 
 
+def _wrap_pi(rad: float) -> float:
+    return (float(rad) + math.pi) % (2.0 * math.pi) - math.pi
+
+
 def _eph_from_theta(theta: np.ndarray, toe: float, gps_week: int,
                     sys: str = "G") -> dict:
     e = dict(zip(_PARAMS, (float(x) for x in theta)))
@@ -131,14 +135,13 @@ def _seed(pos: np.ndarray, vel_ecef: np.ndarray, toe: float,
     e = float(np.linalg.norm(evec))
     e = min(max(e, 1e-4), 0.05)
 
-    h_ec = np.cross(pos, vel_ecef)
-    node = np.cross([0.0, 0.0, 1.0], h_ec)
+    node = np.cross([0.0, 0.0, 1.0], h_in)
     nn = float(np.linalg.norm(node))
     if nn < 1e-6:
         node = np.array([1.0, 0.0, 0.0])
         nn = 1.0
     n_hat = node / nn
-    h_hat = h_ec / np.linalg.norm(h_ec)
+    h_hat = h_in / np.linalg.norm(h_in)
     m_hat = np.cross(h_hat, n_hat)
     u = math.atan2(float(pos @ m_hat), float(pos @ n_hat))
     lon_node = math.atan2(node[1], node[0])
@@ -330,6 +333,10 @@ def fit_satellite(state_fn, epoch: GPSTime, *, prn, source: str,
         if not improved or cost < 1e-16:
             break
     theta = x * _SCALE
+    if theta[1] < 0:
+        theta[1] = -theta[1]
+        theta[0] = _wrap_pi(theta[0] + math.pi)
+        theta[8] = _wrap_pi(theta[8] - math.pi)
 
     pos_resid = np.linalg.norm(r.reshape(-1, 3), axis=1)
     max_pos = float(pos_resid.max())

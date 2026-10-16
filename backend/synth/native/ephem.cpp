@@ -91,6 +91,12 @@ void propagate(const KeplerEph *e, const SysP &sp, bool geo, double tk,
         ecef(o, out3);
     }
 }
+
+double wrap_week(double dt) {
+    if (dt > 302400.0) dt -= 604800.0;
+    else if (dt < -302400.0) dt += 604800.0;
+    return dt;
+}
 }  // namespace
 
 // sys: 0 GPS/QZSS, 1 Galileo, 2 BeiDou MEO/IGSO, 3 BeiDou GEO. Selects mu /
@@ -101,9 +107,7 @@ void synth_sat_state_sys(const KeplerEph *e, int sys, double t_gps,
     const SysP &sp = kSysP[sys];
     const bool geo = (sys == 3);
 
-    double tk = t_gps - e->toe;
-    if (tk > 302400.0) tk -= 604800.0;
-    else if (tk < -302400.0) tk += 604800.0;
+    double tk = wrap_week(t_gps - e->toe);
 
     double E = 0.0;
     propagate(e, sp, geo, tk, pos3, &E);
@@ -114,7 +118,7 @@ void synth_sat_state_sys(const KeplerEph *e, int sys, double t_gps,
     propagate(e, sp, geo, tk + dt, p1, nullptr);
     for (int k = 0; k < 3; ++k) vel3[k] = (p1[k] - p0[k]) / (2.0 * dt);
 
-    double tsv = t_gps - e->toc;
+    double tsv = wrap_week(t_gps - e->toc);
     *clk1 = e->af0 + e->af1 * tsv + e->af2 * tsv * tsv
             + sp.frel * e->e * e->sqrtA * std::sin(E);
 }

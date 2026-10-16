@@ -307,3 +307,50 @@ def test_ad9361_write_rounds_and_saturates():
     got = dev.tx_calls[-1][0]
     assert got[0] == 2 - 2j
     assert got[1] == ad9361.DAC_FULL_SCALE - 1j * ad9361.DAC_FULL_SCALE
+
+
+def test_pump_write_failure_surfaces_the_real_error_to_the_producer(monkeypatch):
+    """backend.write hatası pump'ı öldürür; üretici 10 s 'queue full' yerine
+    gerçek nedeni hemen görmeli."""
+    monkeypatch.setattr(dual_tx, "_PUT_TIMEOUT_S", 2.0)
+    sink = dual_tx.acquire("TX1", "ip:1.2.3.4", 1575420000.0, 2_600_000.0, -30.0)
+    dev = _FakeAD9361.instances[0]
+
+    def boom(blocks):
+        raise OSError("USB unplugged")
+    dev.tx = boom
+    block = np.zeros(dual_tx._BLOCK_SAMPLES, dtype=np.complex64)
+    try:
+        with pytest.raises(transmit.TransmitError, match="USB unplugged"):
+            for _ in range(dual_tx._QUEUE_DEPTH * 3):
+                sink.push(block)
+                time.sleep(0.01)
+    finally:
+        sink.close()
+
+
+def test_set_gain_failure_does_not_leave_a_stale_card(monkeypatch):
+    def bad_gain(self, *a, **k):
+        raise RuntimeError("gain write failed")
+    monkeypatch.setattr(dual_tx.BACKENDS["pluto"], "set_gain", bad_gain)
+    with pytest.raises(RuntimeError):
+        dual_tx.acquire("TX1", "ip:1.2.3.4", 1575420000.0, 2_600_000.0, -30.0)
+    assert dual_tx._card is None
+
+
+def test_open_failure_closes_the_device_handle(monkeypatch):
+    """LO kenetlenmesi open_tx'i düşürürse libiio bağlamı kapatılmalı."""
+    class _Clamping(_FakeAD9361):
+        @property
+        def tx_lo(self):
+            return 1_000_000_000          # istenenden çok farklı
+        @tx_lo.setter
+        def tx_lo(self, v):
+            pass
+    fake_module = types.ModuleType("adi")
+    fake_module.ad9361 = _Clamping
+    monkeypatch.setitem(sys.modules, "adi", fake_module)
+    with pytest.raises(transmit.TransmitError, match="clamped LO"):
+        dual_tx.acquire("TX1", "ip:1.2.3.4", 1575420000.0, 2_600_000.0, -30.0)
+    assert _FakeAD9361.instances[-1].destroyed is True
+    assert dual_tx._card is None

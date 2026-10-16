@@ -61,6 +61,10 @@ class ImpairmentConfig:
         cfg = cls(**{k: d[k] for k in d if k in keys})
         if cfg.snr_db is not None and cfg.noise_power is not None:
             raise ValueError("impairments: give snr_db or noise_power, not both")
+        # noise_power <= 0: apply() içinde log10(sig/0) ZeroDivisionError ya da
+        # negatif varyansla sqrt hatası verirdi; girişte reddet.
+        if cfg.noise_power is not None and not (float(cfg.noise_power) > 0.0):
+            raise ValueError("impairments: noise_power must be > 0")
         if not (0.0 <= cfg.clip_fraction <= 1.0):
             raise ValueError("impairments: clip_fraction must be in [0, 1]")
         if cfg.quant_bits < 0 or cfg.quant_bits > 16:
@@ -155,10 +159,14 @@ def apply(iq: np.ndarray, sample_rate: float,
         report["clipped_fraction"] = float(np.mean(over))
 
     if cfg.quant_bits:
-        peak = float(np.max(np.abs(np.concatenate([x.real, x.imag])))) or 1.0
-        levels = 2 ** cfg.quant_bits
-        q = np.round(x.real / peak * (levels / 2 - 1)) / (levels / 2 - 1) * peak
-        qi = np.round(x.imag / peak * (levels / 2 - 1)) / (levels / 2 - 1) * peak
+        peak = max(float(np.max(np.abs(x.real))), float(np.max(np.abs(x.imag)))) or 1.0
+        if cfg.quant_bits == 1:
+            q = np.where(x.real >= 0, peak, -peak)
+            qi = np.where(x.imag >= 0, peak, -peak)
+        else:
+            scale = 2 ** (cfg.quant_bits - 1) - 1
+            q = np.round(x.real / peak * scale) / scale * peak
+            qi = np.round(x.imag / peak * scale) / scale * peak
         x = (q + 1j * qi).astype(np.complex64)
         report["applied"].append("quantize")
 

@@ -95,10 +95,11 @@ def state(cfg: ReceiverClockConfig, gps_sow: float) -> dict:
     ``clock_offset_s``   the receiver clock offset itself.
     """
     off = offset_s(cfg, gps_sow)
+    r = rate_s_per_s(cfg, gps_sow)
     return {
         "model": cfg.model,
         "clock_offset_s": off,
         "range_bias_m": _C * off,
-        "drift_s_per_s": cfg.drift_s_per_s if cfg.enabled else 0.0,
-        "carrier_offset_hz": (-_L1_HZ * cfg.drift_s_per_s) if cfg.enabled else 0.0,
+        "drift_s_per_s": r,
+        "carrier_offset_hz": -_L1_HZ * r,
     }

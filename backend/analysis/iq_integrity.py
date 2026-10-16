@@ -31,7 +31,7 @@ def _occupied_bandwidth(iq: np.ndarray, sample_rate: float, frac: float = 0.99):
     n = min(len(iq), 65536)
     if n < 16:
         return 0.0
-    seg = iq[:n] * np.hanning(n)
+    seg = iq[:n].astype(np.complex64) * np.hanning(n)
     psd = np.abs(np.fft.fftshift(np.fft.fft(seg))) ** 2
     freqs = np.fft.fftshift(np.fft.fftfreq(n, 1.0 / sample_rate))
     total = psd.sum()
@@ -64,8 +64,8 @@ def validate_array(iq: np.ndarray, sample_rate: float, *,
 
     i = iq.real.astype(np.float64)
     q = iq.imag.astype(np.float64)
-    fs = _FULL_SCALE.get(sample_format, max(1.0, float(np.max(np.abs(iq)) or 1.0)))
-    peak = float(np.max(np.abs(np.concatenate([i, q]))))
+    peak = max(float(np.max(np.abs(i))), float(np.max(np.abs(q))))
+    fs = _FULL_SCALE.get(sample_format, max(1.0, peak))
     rep["peak"] = peak
     rep["full_scale"] = fs
     if peak > fs * 1.0001:
@@ -89,8 +89,8 @@ def validate_array(iq: np.ndarray, sample_rate: float, *,
         problems.append(f"I/Q correlation {rep['iq_correlation']:.2f} (quadrature error)")
 
     if np.iscomplexobj(iq):
-        rep["occupied_bw_hz"] = _occupied_bandwidth(iq.astype(np.complex64), sample_rate)
-        if rep["occupied_bw_hz"] > sample_rate:
+        rep["occupied_bw_hz"] = _occupied_bandwidth(iq[:65536].astype(np.complex64), sample_rate)
+        if rep["occupied_bw_hz"] >= sample_rate * 0.98:
             problems.append("occupied bandwidth exceeds sample rate (aliasing)")
 
     if expected_duration_s is not None:

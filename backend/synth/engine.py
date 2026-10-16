@@ -61,14 +61,20 @@ _E1_IS_PILOT = True     # E1C pilot for acquisition; E1B when nav bits added
 # 3.3.2.4). Chip bit 0 -> +1, 1 -> -1, matching the ranging-code sign
 # convention. One NH chip per 1 ms primary code period (1 kHz).
 _NH10_CHIPS = tuple(1 if b == "0" else -1 for b in "0000110101")
+_NH10_ARR = np.ascontiguousarray(_NH10_CHIPS, dtype=np.int8)
+_NH10_ARR.flags.writeable = False
 # Galileo E5a-I CS20 secondary (Galileo OS SIS ICD Annex C), same fixed
 # 20-chip code for every PRN. Same bit->chip convention as NH10 above. One
 # CS20 chip per 1 ms primary code period (1 kHz).
 _CS20_CHIPS = tuple(1 if b == "0" else -1 for b in "10000100001011101001")
+_CS20_ARR = np.ascontiguousarray(_CS20_CHIPS, dtype=np.int8)
+_CS20_ARR.flags.writeable = False
 # BeiDou B2a-data 5-chip secondary "00010" (BDS-SIS-ICD-B2a-1.0), same
 # fixed code for every PRN. Same bit->chip convention as NH10/CS20 above.
 # One chip per 1 ms primary code period (1 kHz) -> 200 Hz symbol rate.
 _B2A_SEC5_CHIPS = tuple(1 if b == "0" else -1 for b in "00010")
+_B2A_SEC5_ARR = np.ascontiguousarray(_B2A_SEC5_CHIPS, dtype=np.int8)
+_B2A_SEC5_ARR.flags.writeable = False
 
 # RINEX per-system satellite numbers -> native synth_code PRN domain.
 #   QZSS  Jnn  -> PRN 192+nn  (J01 = 193, native range 193..202)
@@ -245,6 +251,16 @@ def _trajectory_knots(state, rx, sow, fs, block_samples, total_samples,
     cph = 2.0 * math.pi * cyc
     cr = chip_rate_hz + cd - chip_rate_hz * clk_rate
     kp = eff + chip_rate_hz * ts - (chip_rate_hz / config.C) * dr_code
+    dt_b = int(block_samples) / fs
+    if nk > 1:
+        # Carrier phase difference wrapped to [-pi, pi)
+        d_cph_wrap = (np.diff(cph) + math.pi) % (2.0 * math.pi) - math.pi
+        # Restore full integer cycle advance using nominal instantaneous frequency
+        n_cycles = np.round(cf[:-1] * dt_b - d_cph_wrap / (2.0 * math.pi))
+        d_cph_unwrapped = 2.0 * math.pi * n_cycles + d_cph_wrap
+        cph_unwrapped = np.concatenate([[cph[0]], cph[0] + np.cumsum(d_cph_unwrapped)])
+        cf = np.append(np.diff(cph_unwrapped) / (2.0 * math.pi * dt_b), cf[-1])
+        cr = np.append(np.diff(kp) / dt_b, cr[-1])
     return cf.tolist(), cph.tolist(), cr.tolist(), kp.tolist()
 
 
@@ -266,8 +282,8 @@ def _sat_interp(state, t_lo: float, t_hi: float):
     n = int(math.ceil((t_hi - a) / h)) + m // 2 + 1
     tn = a + h * np.arange(n)
     pv = [state(float(t)) for t in tn]
-    P = np.array([np.asarray(p, float) for p, _v, _c in pv])
-    V = np.array([np.asarray(v, float) for _p, v, _c in pv])
+    P = np.array([np.asarray(item[0], float) for item in pv])
+    V = np.array([np.asarray(item[1], float) for item in pv])
     k = np.arange(m)
     denom = np.array([np.prod([kk - j for j in range(m) if j != kk])
                       for kk in range(m)], float)
@@ -284,6 +300,31 @@ def _sat_interp(state, t_lo: float, t_hi: float):
         return (np.einsum("qm,qmc->qc", w, P[idx]),
                 np.einsum("qm,qmc->qc", w, V[idx]))
     return f
+
+
+def _ecef_to_lat_lon(x, y, z):
+    """Convert ECEF coordinates (x, y, z) to WGS-84 geodetic (lat_rad, lon_rad).
+    Supports both scalar floats and numpy arrays."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    z = np.asarray(z, dtype=float)
+    lon = np.arctan2(y, x)
+    p = np.hypot(x, y)
+    a_wgs84 = getattr(geometry, "_A_WGS84", 6378137.0)
+    e2_wgs84 = getattr(geometry, "_E2_WGS84", 6.69437999014e-3)
+    lat = np.arctan2(z, p * (1.0 - e2_wgs84))
+    for _ in range(6):
+        n = a_wgs84 / np.sqrt(1.0 - e2_wgs84 * np.sin(lat) ** 2)
+        h = p / np.cos(lat) - n
+        lat = np.arctan2(z, p * (1.0 - e2_wgs84 * n / (n + h)))
+    lat = np.where(p < 1e-6, np.where(z > 0, np.pi / 2.0, -np.pi / 2.0), lat)
+    if lat.ndim == 0:
+        return float(lat), float(lon)
+    return lat, lon
+
+
+if not hasattr(geometry, "_ecef_to_lat_lon"):
+    geometry._ecef_to_lat_lon = _ecef_to_lat_lon
 
 
 def _observables_vec(state, rxs, vrx, t_rx, signal):
@@ -306,8 +347,7 @@ def _observables_vec(state, rxs, vrx, t_rx, signal):
     geo = np.linalg.norm(los_vec, axis=1)
     los = los_vec / geo[:, None]
     x, y, z = rxs[:, 0], rxs[:, 1], rxs[:, 2]
-    lon = np.arctan2(y, x)
-    lat = np.arctan2(z, np.sqrt(x * x + y * y))
+    lat, lon = geometry._ecef_to_lat_lon(x, y, z)
     le = -np.sin(lon) * los[:, 0] + np.cos(lon) * los[:, 1]
     ln = (-np.sin(lat) * np.cos(lon) * los[:, 0]
           - np.sin(lat) * np.sin(lon) * los[:, 1] + np.cos(lat) * los[:, 2])
@@ -355,19 +395,45 @@ def _plain_spec(entry, gain, code_arr, chip_rate_hz):
 
 
 def _attach_nav(spec, nav):
-    nbuf, nbits, sym_rate = nav
+    nbuf = nav[0]
+    nbits = nav[1]
+    sym_rate = nav[2]
     spec.nav_mode = 1
     spec.nav_bits = nbuf
     spec.nav_nbits = nbits
     spec.nav_sym_rate_hz = float(sym_rate)
-    return nbuf
+    return nav[3] if len(nav) > 3 else nbuf
 
 
 def _attach_sec(spec, chips, rate_hz):
-    arr = np.asarray(chips, dtype=np.int8)
+    arr = np.ascontiguousarray(chips, dtype=np.int8)
     spec.sec_code = _i8(arr)
     spec.sec_len = int(arr.size)
     spec.sec_rate_hz = float(rate_hz)
+    return arr
+
+
+@functools.lru_cache(maxsize=64)
+def _l5_i5_code(prn: int):
+    i5, _ = _lib.code_l5(prn)
+    arr = np.ascontiguousarray(i5, dtype=np.int8)
+    arr.flags.writeable = False
+    return arr
+
+
+@functools.lru_cache(maxsize=64)
+def _e5a_i_code(prn: int):
+    ei, _ = _lib.code_e5a(prn)
+    arr = np.ascontiguousarray(ei, dtype=np.int8)
+    arr.flags.writeable = False
+    return arr
+
+
+@functools.lru_cache(maxsize=64)
+def _b2a_d_code(prn: int):
+    bd, _ = _lib.code_b2a(prn)
+    arr = np.ascontiguousarray(bd, dtype=np.int8)
+    arr.flags.writeable = False
     return arr
 
 
@@ -448,37 +514,12 @@ def _sv_spec_for(entry, gain, nav=None):
     # pilot is not needed for the data-signal closed-loop fix and is left
     # out (as the CL pilot is on L2C).
     if sysc in ("G", "J") and getattr(sig, "band", "L1") == "L5":
-        i5, _q5 = _lib.code_l5(entry["prn"])
-        spec = _lib.SvSpec()
-        pbuf = (ctypes.c_int8 * 10230)(*i5.tolist())
-        spec.code = pbuf
-        keep = [pbuf]
-        spec.code_len = 10230
-        spec.chip_rate_hz = 10.23e6
-        spec.carrier_freq_hz = entry["carrier_doppler_hz"]
-        spec.carrier_phase0_rad = 0.0
-        spec.code_phase0_chips = entry["code_phase_chips"]
-        spec.code_doppler_hz = entry["code_doppler_hz"]
-        spec.nav_mode = 0
-        spec.nav_bits = None
-        spec.nav_nbits = 0
-        spec.nav_sym_rate_hz = 0.0
+        i5 = _l5_i5_code(entry["prn"])
+        spec = _plain_spec(entry, gain, i5, 10.23e6)
+        keep = [i5]
         if nav is not None:
-            nbuf, nbits, sym_rate = nav
-            spec.nav_mode = 1
-            spec.nav_bits = nbuf
-            spec.nav_nbits = nbits
-            spec.nav_sym_rate_hz = float(sym_rate)
-            keep.append(nbuf)
-        spec.gain = gain
-        spec.prn = entry["prn"]
-        spec.sys = _SYS_INT[sysc]
-        spec.sub_carrier_hz = 0.0
-        nh10 = _NH10_CHIPS
-        sbuf = (ctypes.c_int8 * 10)(*nh10)
-        spec.sec_code = sbuf
-        spec.sec_len = 10
-        spec.sec_rate_hz = 1000.0
+            keep.append(_attach_nav(spec, nav))
+        sbuf = _attach_sec(spec, _NH10_ARR, 1000.0)
         keep.append(sbuf)
         return spec, keep
 
@@ -491,37 +532,12 @@ def _sv_spec_for(entry, gain, nav=None):
     # dataless pilot is not needed for the data-signal closed-loop fix and
     # is left out, mirroring Q5 on L5 and CL on L2C.
     if sysc == "E" and getattr(sig, "band", "L1") == "L5":
-        ei, _eq = _lib.code_e5a(entry["prn"])
-        spec = _lib.SvSpec()
-        pbuf = (ctypes.c_int8 * 10230)(*ei.tolist())
-        spec.code = pbuf
-        keep = [pbuf]
-        spec.code_len = 10230
-        spec.chip_rate_hz = 10.23e6
-        spec.carrier_freq_hz = entry["carrier_doppler_hz"]
-        spec.carrier_phase0_rad = 0.0
-        spec.code_phase0_chips = entry["code_phase_chips"]
-        spec.code_doppler_hz = entry["code_doppler_hz"]
-        spec.nav_mode = 0
-        spec.nav_bits = None
-        spec.nav_nbits = 0
-        spec.nav_sym_rate_hz = 0.0
+        ei = _e5a_i_code(entry["prn"])
+        spec = _plain_spec(entry, gain, ei, 10.23e6)
+        keep = [ei]
         if nav is not None:
-            nbuf, nbits, sym_rate = nav
-            spec.nav_mode = 1
-            spec.nav_bits = nbuf
-            spec.nav_nbits = nbits
-            spec.nav_sym_rate_hz = float(sym_rate)
-            keep.append(nbuf)
-        spec.gain = gain
-        spec.prn = entry["prn"]
-        spec.sys = _SYS_INT[sysc]
-        spec.sub_carrier_hz = 0.0
-        cs20 = _CS20_CHIPS
-        sbuf = (ctypes.c_int8 * 20)(*cs20)
-        spec.sec_code = sbuf
-        spec.sec_len = 20
-        spec.sec_rate_hz = 1000.0
+            keep.append(_attach_nav(spec, nav))
+        sbuf = _attach_sec(spec, _CS20_ARR, 1000.0)
         keep.append(sbuf)
         return spec, keep
 
@@ -535,37 +551,12 @@ def _sv_spec_for(entry, gain, nav=None):
     # needed for the data-signal closed-loop fix and is left out, mirroring
     # Q5/E5a-Q/CL.
     if sysc == "C" and getattr(sig, "band", "L1") == "L5":
-        bd, _bp = _lib.code_b2a(entry["prn"])
-        spec = _lib.SvSpec()
-        pbuf = (ctypes.c_int8 * 10230)(*bd.tolist())
-        spec.code = pbuf
-        keep = [pbuf]
-        spec.code_len = 10230
-        spec.chip_rate_hz = 10.23e6
-        spec.carrier_freq_hz = entry["carrier_doppler_hz"]
-        spec.carrier_phase0_rad = 0.0
-        spec.code_phase0_chips = entry["code_phase_chips"]
-        spec.code_doppler_hz = entry["code_doppler_hz"]
-        spec.nav_mode = 0
-        spec.nav_bits = None
-        spec.nav_nbits = 0
-        spec.nav_sym_rate_hz = 0.0
+        bd = _b2a_d_code(entry["prn"])
+        spec = _plain_spec(entry, gain, bd, 10.23e6)
+        keep = [bd]
         if nav is not None:
-            nbuf, nbits, sym_rate = nav
-            spec.nav_mode = 1
-            spec.nav_bits = nbuf
-            spec.nav_nbits = nbits
-            spec.nav_sym_rate_hz = float(sym_rate)
-            keep.append(nbuf)
-        spec.gain = gain
-        spec.prn = entry["prn"]
-        spec.sys = _SYS_INT[sysc]
-        spec.sub_carrier_hz = 0.0
-        sec5 = _B2A_SEC5_CHIPS
-        sbuf = (ctypes.c_int8 * 5)(*sec5)
-        spec.sec_code = sbuf
-        spec.sec_len = 5
-        spec.sec_rate_hz = 1000.0
+            keep.append(_attach_nav(spec, nav))
+        sbuf = _attach_sec(spec, _B2A_SEC5_ARR, 1000.0)
         keep.append(sbuf)
         return spec, keep
 
@@ -598,10 +589,10 @@ def _sv_spec_for(entry, gain, nav=None):
         except ValueError:
             return None, (f"{sysc}{entry['prn']}: code generation rejected "
                           f"(PRN out of range for {sysc}), skipped")
+    prim = np.ascontiguousarray(prim, dtype=np.int8)
     spec = _lib.SvSpec()
-    pbuf = (ctypes.c_int8 * prim_len)(*prim.tolist())
-    spec.code = pbuf
-    keep = [pbuf]
+    spec.code = _i8(prim)
+    keep = [prim]
     spec.code_len = sig.code_len
     spec.chip_rate_hz = sig.chip_rate_hz
     spec.carrier_freq_hz = entry["carrier_doppler_hz"]
@@ -625,12 +616,7 @@ def _sv_spec_for(entry, gain, nav=None):
     spec.nav_nbits = 0
     spec.nav_sym_rate_hz = 0.0
     if nav is not None:
-        nbuf, nbits, sym_rate = nav
-        spec.nav_mode = 1
-        spec.nav_bits = nbuf
-        spec.nav_nbits = nbits
-        spec.nav_sym_rate_hz = float(sym_rate)
-        keep.append(nbuf)
+        keep.append(_attach_nav(spec, nav))
     spec.gain = gain
     spec.prn = entry["prn"]
     spec.sys = _SYS_INT[sysc]
@@ -639,13 +625,13 @@ def _sv_spec_for(entry, gain, nav=None):
         # CBOC(6,1,1/11) sign: E1-B takes +sc(6,1), E1-C takes -sc(6,1).
         spec._cboc = -1 if code_sys == 6 else 1
     if sec_len and sec is not None:
-        sbuf = (ctypes.c_int8 * sec_len)(*sec.tolist())
-        spec.sec_code = sbuf
+        sec_arr = np.ascontiguousarray(sec, dtype=np.int8)
+        spec.sec_code = _i8(sec_arr)
         spec.sec_len = sec_len
         # B1I NH20: 20 chips, one per 1 ms primary period -> 1000 Hz.
         # E1C CS25: 25 chips, one per 4 ms E1C primary code -> 250 Hz.
         spec.sec_rate_hz = 250.0 if sysc == "E" else 1000.0
-        keep.append(sbuf)
+        keep.append(sec_arr)
     else:
         spec.sec_code = None
         spec.sec_len = 0
@@ -1033,13 +1019,20 @@ def run(req, progress_cb=None) -> pathlib.Path:
     rx_lon_rad = math.radians(float(req.lon))
     rx_h_m = float(req.alt)
 
-    def _atmo_for(carrier_hz):
+    def _atmo_for(carrier_hz, sysc=None):
         if not atmo_cfg.enabled:
             return None
+        # Galileo I/NAV word 5 ai0..ai2 = 0 yayınlıyor (inav_encode.word_type_5):
+        # NeQuick-G alıcı tarafında ~0 iyonosfer düzeltir. Klobuchar gecikmesini
+        # E sinyaline gömmek alıcının çıkaramayacağı birkaç-on metre yanlılık
+        # (düşük elevasyonda artar) ve GPS ile tutarsız ISB üretirdi -> Galileo
+        # fix'i bozar. "Enjekte edilen = yayından çıkarılabilen" ilkesi gereği
+        # E için iyonosfer enjekte edilmez (troposfer yine uygulanır).
+        use_iono = atmo_cfg.ionosphere == "klobuchar" and sysc != "E"
 
         def f(az_rad, el_rad, t_rel):
             iono = tropo = 0.0
-            if atmo_cfg.ionosphere == "klobuchar":
+            if use_iono:
                 iono = atmosphere.klobuchar_delay_m(
                     atmo_cfg.klobuchar_alpha, atmo_cfg.klobuchar_beta,
                     sow + t_rel, rx_lat_rad, rx_lon_rad, az_rad, el_rad,
@@ -1068,7 +1061,7 @@ def run(req, progress_cb=None) -> pathlib.Path:
             e["carrier_doppler_hz"] *= scale
         e["_carrier_hz"] = f_car
         e["_doppler_scale"] = scale
-        fa = _atmo_for(f_car)
+        fa = _atmo_for(f_car, sysc)
         e["_atmo_fn"] = fa
         iono, tropo = (fa(math.radians(e["az_deg"]), math.radians(e["el_deg"]),
                           0.0) if fa is not None else (0.0, 0.0))
@@ -1150,14 +1143,15 @@ def run(req, progress_cb=None) -> pathlib.Path:
             if res is None:
                 continue
             arr, sym_rate = res
-            nbuf = (ctypes.c_int8 * len(arr))(*arr.tolist())
+            nav_arr = np.ascontiguousarray(arr, dtype=np.int8)
+            nbuf = _i8(nav_arr)
             band_id = e["signal_id"].band
             # Keyed by (sys, prn, band): native PRN numbering overlaps across
             # systems (e.g. GPS PRN 5 and Galileo PRN 5 both sit at native
             # "5"), and L5 now carries more than one system -- (prn, band)
             # alone would let one system's nav stream clobber another's.
             nav_streams[(sysc, e["prn"], band_id)] = (
-                nbuf, len(arr), float(sym_rate))
+                nbuf, len(nav_arr), float(sym_rate), nav_arr)
             nav_prov.setdefault(f"{sysc}/{band_id}",
                                 _nav_prov_name(sysc, band_id))
     if not nav_prov:
@@ -1279,6 +1273,20 @@ def run(req, progress_cb=None) -> pathlib.Path:
             meta_svs.append(sv_meta)
         if not sv_list:
             continue
+        # Opt-in sabit uydu başına güç (SIM_NSV_REF > 0): C++ motoru bileşik
+        # seviyeyi 0.25*FS/sqrt(nsv) ile ölçekler; nsv segmentler/run'lar
+        # arasında değişince (uydu doğup batınca) her uydunun gücü sıçrar ve
+        # alıcının C/N0'sı/AGC'si oynar. sqrt(nsv/nsv_ref) ön çarpanı iki
+        # sqrt'yi götürür -> uydu başına genlik 0.25*FS/sqrt(nsv_ref) sabit.
+        # Varsayılan 0 = eski davranış (toplam güç sabit). nsv > nsv_ref ise
+        # toplam RMS sqrt(nsv/nsv_ref) kadar büyür; kırpma payı için nsv_ref'i
+        # tipik en yüksek kanal sayısına yakın seç.
+        nsv_ref = float(getattr(req, "nsv_ref", 0.0) or config.SIM_NSV_REF)
+        pnorm = 1.0
+        if nsv_ref > 0.0:
+            pnorm = math.sqrt(len(sv_list) / nsv_ref)
+            for c in sv_list:
+                c.gain *= pnorm
         total_samples = int(round(plan.fs * req.duration_s))
         bs = _lib.BandSpec()
         if in_memory:
@@ -1289,12 +1297,17 @@ def run(req, progress_cb=None) -> pathlib.Path:
                            out_mem=raw_buf)
             mem_buffers[plan.out_file] = raw_buf
         else:
+            out_p = str(outdir / plan.out_file).encode()
             _lib.fill_band(bs, outdir / plan.out_file, plan.fs, plan.quant,
                            total_samples, sv_list, block_samples=_BLOCK_SAMPLES)
+            bs._out_path_keep = out_p
+            bs.out_path = out_p
+            keep_alive.append(out_p)
         band_specs.append(bs)
         meta_bands.append({
             "id": plan.id, "centre_hz": plan.centre_hz, "fs": plan.fs,
             "file": plan.out_file, "systems": sorted(band_sys),
+            "nsv_ref_scale": round(pnorm, 4),
         })
 
     if not band_specs:

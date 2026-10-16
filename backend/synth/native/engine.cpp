@@ -16,10 +16,15 @@
 // synth_run body, with fs/quant/dither/total_samples/block_samples/nthreads/
 // svs/nsv/out_path sourced from the BandSpec instead of RunSpec + args.
 static int run_one_band(const BandSpec &b,
+                        uint64_t base_done, uint64_t grand_total,
                         void (*progress)(double, void *), void *user) {
     const SvSpec *specs = b.svs;
     const int nsv = b.nsv;
-    if ((!b.out_path && !b.out_mem) || (nsv > 0 && !specs)) return -1;
+    // Hedef tam olarak biri olmalı (abi.h: out_path, out_mem != NULL iken NULL).
+    // İkisi birden verilirse mix bellekteki hedefe yazılır ama yazıcı iş parçacığı
+    // hiç doldurulmamış qbuf'u dosyaya basardı (sessizce bozuk dosya).
+    if ((!b.out_path && !b.out_mem) || (b.out_path && b.out_mem) ||
+        (nsv > 0 && !specs)) return -1;
     std::FILE *f = nullptr;
     if (b.out_path) {
         f = std::fopen(b.out_path, "wb");
@@ -150,9 +155,9 @@ static int run_one_band(const BandSpec &b,
             cur ^= 1;
         }
         done += n;
-        if (progress)
-            progress(static_cast<double>(done) /
-                         static_cast<double>(b.total_samples),
+        if (progress && grand_total > 0)
+            progress(static_cast<double>(base_done + done) /
+                         static_cast<double>(grand_total),
                      user);
     }
     if (f) {
@@ -168,9 +173,14 @@ static int run_one_band(const BandSpec &b,
 int synth_run_bands(const BandSpec *bands, int nband,
                     void (*progress)(double, void *), void *user) {
     if (!bands || nband < 0) return -1;
+    uint64_t grand_total = 0;
+    for (int i = 0; i < nband; ++i)
+        grand_total += bands[i].total_samples;
+    uint64_t base_done = 0;
     for (int i = 0; i < nband; ++i) {
-        const int rc = run_one_band(bands[i], progress, user);
+        const int rc = run_one_band(bands[i], base_done, grand_total, progress, user);
         if (rc != 0) return rc;
+        base_done += bands[i].total_samples;
     }
     return 0;
 }

@@ -88,14 +88,14 @@ def acquire_l1(
     best_pk = -1.0
     best = (0.0, 0)
     best_floor = 1.0
+    t_all = np.arange(nc * npp) / fs
     for fd in dopps:
+        ph_all = np.exp(-1j * 2 * np.pi * (carrier_center + fd) * t_all)
+        seg_derot = seg * ph_all
         acc = np.zeros(npp)
         for k in range(nc):
-            blk = seg[k * npp : (k + 1) * npp]
-            ph = np.exp(
-                -1j * 2 * np.pi * (carrier_center + fd) * (np.arange(k * npp, (k + 1) * npp)) / fs
-            )
-            acc += np.abs(np.fft.ifft(np.fft.fft(blk * ph) * LOC)) ** 2
+            blk_ph = seg_derot[k * npp : (k + 1) * npp]
+            acc += np.abs(np.fft.ifft(np.fft.fft(blk_ph) * LOC)) ** 2
         pk = acc.max()
         if pk > best_pk:
             best_pk = pk
