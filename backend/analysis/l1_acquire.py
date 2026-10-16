@@ -43,8 +43,9 @@ def acquire_l1(
     if sysc not in ("G", "J", "S", "E", "C", "R"):
         raise ValueError(f"unsupported system {sysc!r}")
     if sysc == "R":
-        if glo_k is None or not isinstance(glo_k, int) or isinstance(glo_k, bool) or glo_k not in range(-7, 7):
-            raise ValueError("GLONASS acquisition needs glo_k")
+        # GLONASS kanalları: -7..+6 ve +7 teknik kanalı kapsar
+        if glo_k is None or not isinstance(glo_k, int) or isinstance(glo_k, bool) or glo_k not in range(-7, 8):
+            raise ValueError("GLONASS acquisition needs glo_k in [-7, 7]")
 
     sig = SIGNALS[_SIGNAL_KEYS[sysc]]
     code_len = sig.code_len

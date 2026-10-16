@@ -611,8 +611,12 @@ def _sv_spec_for(entry, gain, nav=None):
         # same FDMA idea. This SV's carrier is offset by k * step plus its
         # geometric Doppler.
         step_hz = 437_500.0 if sig.band == "G2" else 562_500.0
-        spec.carrier_freq_hz += signals.glo_channel_offset_hz(
-            int(entry["glo_k"]), step_hz=step_hz)
+        try:
+            # GLONASS FDMA frekans kayması (k * step_hz)
+            spec.carrier_freq_hz += signals.glo_channel_offset_hz(
+                int(entry["glo_k"]), step_hz=step_hz)
+        except ValueError as exc:
+            return None, f"GLONASS PRN {entry.get('prn')}: geçersiz kanal ({exc}), atlandı"
     spec.carrier_phase0_rad = 0.0
     spec.code_phase0_chips = entry["code_phase_chips"]
     spec.code_doppler_hz = entry["code_doppler_hz"]

@@ -61,9 +61,9 @@ def band_floor(band_id: str, signal_ids: list[str], ks=()) -> float:
     if band_id == "L1":
         return fs_min(signal_ids)
     elif band_id == "G1":
-        # Compute FDMA span requirement
+        # FDMA bant genişliği gereksinimi: -7..+6 ve +7 teknik kanalı kapsar
         if not ks:
-            ks = range(-7, 7)
+            ks = range(-7, 8)
         max_abs_k = max(abs(k) for k in ks)
         max_chip_rate = max(SIGNALS[s].chip_rate_hz for s in signal_ids)
         channel_span = 2 * (max_abs_k * 562_500.0 + max_chip_rate)
@@ -79,7 +79,7 @@ def band_floor(band_id: str, signal_ids: list[str], ks=()) -> float:
         return math.ceil(need / 1e5) * 1e5
     elif band_id == "G2":
         if not ks:
-            ks = range(-7, 7)
+            ks = range(-7, 8)
         max_abs_k = max(abs(k) for k in ks)
         max_chip_rate = max(SIGNALS[s].chip_rate_hz for s in signal_ids)
         channel_span = 2 * (max_abs_k * 437_500.0 + max_chip_rate)

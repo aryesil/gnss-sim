@@ -52,11 +52,13 @@ def test_g1_band_floor_covers_fdma_span():
 def test_channel_offset_linear():
     assert signals.glo_channel_offset_hz(0) == 0.0
     assert signals.glo_channel_offset_hz(-7) == -7 * 562_500.0
+    # k=7 is the technical channel per GLONASS ICD 5.1 / active on R28
+    assert signals.glo_channel_offset_hz(7) == 7 * 562_500.0
 
 
 def test_channel_offset_rejects_out_of_range():
     with pytest.raises(ValueError):
-        signals.glo_channel_offset_hz(7)
+        signals.glo_channel_offset_hz(8)
     with pytest.raises(ValueError):
         signals.glo_channel_offset_hz(-8)
 

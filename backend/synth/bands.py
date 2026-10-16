@@ -66,7 +66,8 @@ def _band_fs(band_id: str, sig_ids: list[str], req) -> float:
             return fs_policy.default_fs(sig_ids)
         return fs_policy.validate_fs(fs, sig_ids)
     override = getattr(req, f"{band_id.lower()}_sample_rate", None)
-    ks = range(-7, 7) if band_id in ("G1", "G2") else ()
+    # -7..+6 operasyonel kanallar + 7 teknik kanalı kapsayacak şekilde aralık [-7, 7]
+    ks = range(-7, 8) if band_id in ("G1", "G2") else ()
     floor = fs_policy.band_floor(band_id, sig_ids, ks=ks)
     return max(float(override or 0.0), floor)
 
