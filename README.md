@@ -1,30 +1,13 @@
-# GNSS L1 Signal Simulator
+# GNSS Signal Simulator
 
-A controlled, observable, and reproducible GNSS signal testing workbench.
+A controlled, observable, and reproducible multi-constellation GNSS signal testing workbench.
 
-Pick a place and time on a map, generate a baseband L1 IQ recording, check it
-with a built-in software receiver, decode its navigation message, and —
-optionally, into a cable and never over the air — replay it to a
-PlutoSDR-class SDR or a Nuand bladeRF. Every RF-relevant action is written to
-a persistent audit log.
+Pick a place and time on a map, generate baseband IQ recordings across multiple GNSS bands, check them with a built-in software receiver, decode broadcast navigation messages directly from IQ, and — into a cable and never over the air — replay them live to a PlutoSDR-class SDR or a Nuand bladeRF. Every RF-relevant action is written to a persistent audit log.
 
-Two generation engines:
+**High-Performance Native C++ Engine:**  
+Powered by a built-in C++20 engine that renders **GPS (L1 C/A, L2C, L5), GLONASS (G1, G2), Galileo (E1, E5a), BeiDou (B1I, B2a), QZSS (L1 C/A, L5), SBAS (L1), and NavIC (L5)** from a correlated multi-constellation geometry (synchronized receive epoch so cross-system acquisition lines up). Supports completely arbitrary constellation selection (Galileo-only, BeiDou-only, GPS-free multi-GNSS), per-satellite land-mobile-satellite channel fading (seeded or cryptographically unpredictable ChaCha20), and multi-band RF routing (1575.42 MHz L1 group, 1602 MHz GLONASS FDMA, 1227.60 MHz L2, 1176.45 MHz L5).
 
-- **`gps-sdr-sim`** (default) —
-  [the external GPS L1 C/A generator](https://github.com/osqzss/gps-sdr-sim).
-- **`native`** — a built-in C++20 engine that renders the same GPS L1 C/A
-  output **plus GLONASS G1, Galileo E1, BeiDou B1I, QZSS L1 C/A and SBAS L1**
-  from one correlated multi-constellation geometry (one receive epoch, so
-  cross-system acquisition lines up), with a per-satellite land-mobile-satellite
-  channel model (seeded, or keyed and cryptographically unpredictable) baked
-  into the IQ. GLONASS FDMA is written to its own 1602 MHz band
-  file; every other system interleaves in the 1575.42 MHz L1 group.
-
-Signal generation runs from broadcast ephemeris by default; in **precise
-mode** an IGS SP3 orbit/clock product is fitted into the record set that
-drives generation, so the satellite states behind the IQ match the precise
-product to well under a metre. Precise mode is multi-GNSS on the native
-engine (GPS + GLONASS + Galileo + BeiDou + QZSS from an MGEX SP3 product).
+Signal generation runs from broadcast ephemeris by default; in **precise mode** an IGS SP3 orbit/clock product drives satellite propagation directly at runtime across all constellations (GPS, GLONASS, Galileo, BeiDou, QZSS from an MGEX SP3 product), or fits into broadcast records with sub-metre residual error.
 
 > ⚠️ **RF safety first.** Transmit is disabled by default. Read
 > [Safety](#safety) before enabling it. Lawful, authorized operation is
@@ -53,111 +36,56 @@ engine (GPS + GLONASS + Galileo + BeiDou + QZSS from an MGEX SP3 product).
 
 ## Features
 
-- **Generate** — static point or dynamic waypoint route → `gps-sdr-sim` or
-  the native C++ engine → raw interleaved IQ + `meta.json`, with streamed
-  progress. The native engine adds a constellation picker (GPS always on;
-  GLONASS / Galileo / BeiDou / QZSS / SBAS opt-in), a per-satellite
-  channel model, and int16 / int12 / int8 quantisation. The channel is a
-  three-state (line-of-sight / shadowed / blocked) Loo model: a slow
-  correlated state process with elevation-dependent probabilities for the
-  chosen `environment` (`open`, `rural`, `suburban`, `urban`), log-normal
-  shadowing of the direct path, and Rayleigh diffuse multipath with a Jakes
-  Doppler spectrum of spread speed / wavelength. All three advance with the
-  distance the receiver travels (plus a slow term for satellite motion, so a
-  static receiver still drifts over minutes). Leave `speed_mps` unset to take
-  the distance profile of the waypoint route (stops fade slowly, fast
-  stretches fast; static when there is no route), or set it for a constant
-  speed. All bands of a satellite share its blockage and shadowing;
-  the diffuse part is independent per carrier. The gain is complex and is
-  interpolated per sample between knots that resolve the Doppler spread. The
-  preset values are representative of published L-band land-mobile
-  measurements (Perez-Fontan / ITU-R P.681 style), not a calibrated copy of
-  one campaign, and multipath code delay is modelled separately (channel
-  models panel). Randomness is ChaCha20: `seeded` derives the key from a seed
-  (reproducible, so predictable by anyone who knows it); `keyed` uses a
-  256-bit key, and an empty key draws a fresh one from the OS CSPRNG per run.
-  `meta.json` records only a fingerprint of the key unless `record_key` is
-  set. The pre-ABI-28 name `lognormal` is accepted as `seeded`.
-- **Inspect** — power spectrum (every RF band overlaid on one absolute-Hz
-  axis), per-PRN acquisition (Doppler + code phase) for a GPS-only run, a
-  per-satellite signal-power panel across **all** constellations for a
-  multi-GNSS run (elevation taper + channel gain, re-evaluated as the IQ scrubber
-  moves), code-correlation curves, measured-vs-predicted geometry. All
-  status-panel canvases render at the display's pixel density.
-- **Verify** — a from-scratch software receiver acquires the generated IQ,
-  solves a least-squares fix, and reports the error against the map marker.
-- **Decode** — reconstruct and explain the LNAV navigation message
-  (subframes, parity, clock/ephemeris parameters) for a chosen PRN.
-- **Transmit** (opt-in) — push IQ to a PlutoSDR-class device (`pyadi-iio`) or
-  a Nuand bladeRF (`libbladeRF`), picked per channel with a `kind` field
-  (`pluto` default, `bladerf`), with underflow tracking, a cancel event, and
-  an optional fail-safe timeout. An optional RF frontend layer plans an
-  LO-offset (`DISABLED` / `MANUAL` / `AUTO`) between the AD9361 LO and the
-  target RF frequency and, when an offset is in play, auto-triggers TX
-  quadrature calibration before streaming.
-- **Live session** — regenerate one short IQ segment at a time so position
-  and GPS time can be jogged *while transmitting*; timeline scripting;
-  live spectrogram + C/N0 trend over SSE; record the SSE stream and replay
-  it later with no hardware attached.
-- **Precise ephemeris** — parse IGS SP3-c/d products and interpolate
-  satellite ECEF position/velocity and clock. Two uses: (1) *analysis* —
-  compare the precise reference against the realigned broadcast column;
-  (2) *generation* — least-squares fit the SP3 track into a broadcast
-  record set (solved M0 + perturbations, a 4 h arc) so `gps-sdr-sim`
-  propagates satellite states that match the precise product to
-  sub-metre, instead of the epoch-stamped `toc`/`toe` approximation.
-- **Operations support** — persistent JSONL audit log, multi-operator
-  `/ws/events` WebSocket mirror, real-receiver NMEA feedback (UDP/serial),
-  named trajectory and scenario presets, optional API-key RBAC.
+- **Generate** — static point or dynamic waypoint route → native C++20 engine (`libgnsssynth`) → raw interleaved IQ + `meta.json`, with streamed progress.
+  - **Flexible Constellations** — arbitrary constellation selection without mandatory GPS (run pure Galileo E1, BeiDou B1I, GLONASS, QZSS, SBAS, or any combination).
+  - **Multi-Band & Quantisation** — supports L1 (1575.42 MHz / 1602 MHz GLONASS), L2 (1227.60 MHz), and L5 (1176.45 MHz) with `int16`, `int12`, and `int8` complex sample formats.
+  - **Land-Mobile-Satellite Channel** — three-state (line-of-sight / shadowed / blocked) Loo model: elevation-dependent state probabilities (`open`, `rural`, `suburban`, `urban`), log-normal shadowing of the direct path, and Rayleigh diffuse multipath with a Jakes Doppler spread ($v / \lambda$). Advances with distance travelled along waypoint routes (or static drift). Blockage is shared across satellite bands; diffuse fading is carrier-independent. Randomness via ChaCha20: `seeded` (reproducible) or `keyed` (256-bit CSPRNG key).
+- **Inspect** — power spectrum (every RF band overlaid on an absolute-Hz axis), per-PRN acquisition (Doppler + code phase), per-satellite signal-power panel across **all** constellations (elevation taper + channel gain, re-evaluated as the IQ scrubber moves), code-correlation curves, and measured-vs-predicted geometry. Status panels render at display pixel density.
+- **Verify** — a from-scratch software receiver acquires the generated composite IQ, solves a multi-GNSS least-squares fix (LS / WLS), and reports the position error against ground truth.
+- **Standalone Blind Nav Decode** — reconstructs broadcast navigation messages directly from IQ without external ephemeris files:
+  - **GPS L1 C/A:** LNAV subframes (50 bps), parity checks, ephemeris/clock parameters.
+  - **Galileo E1:** I/NAV pages (250 sym/s, rate-1/2 FEC, 10-word reconstructor) compliant with Galileo OS SIS ICD Issue 2.0/2.1.
+  - **BeiDou B1I:** D1 navigation frames (50 bps) with BCH (15,11,1) decoding, deinterleaving, and NH20 secondary code wipe-off.
+  - **SBAS L1:** RTCA DO-229 / ICAO Annex 10 compliant 500 sym/s stream, rate-1/2 K=7 convolutional FEC, direct-form CRC-24Q, Type 9 GEO navigation messages.
+- **Transmit (opt-in)** — push IQ to a PlutoSDR-class device (`pyadi-iio`) or a Nuand bladeRF (`libbladeRF`), selectable per channel (`kind: pluto` or `kind: bladerf`), with underflow tracking, thread cancellation, and fail-safe auto-stop timeouts. An RF frontend layer plans LO-offsets (`DISABLED` / `MANUAL` / `AUTO`) between the AD9361 LO and target frequency, auto-triggering TX quadrature calibration.
+- **Live Session (`Start Now`)** — direct in-memory live streaming to SDR with zero disk wait:
+  - **Strict Time Continuity** — GPS transmit time advances strictly forward ($t = k \times 1.0\text{ s}$ for $k=0, 1, 2, \dots$); time never rewinds or replays.
+  - **Live Controls & Scripting** — jog receiver coordinates and shift GPS time on-the-fly while transmitting; scheduled timeline scripting (`jog` and `time_shift` at $t + N\text{ s}$).
+  - **Real-Time Diagnostics** — live spectrogram waterfall and C/N0 trend streamed via Server-Sent Events (SSE). Record SSE streams to disk and replay without SDR hardware.
+  - **Live GPS Time Sync** — `Live: now` mode leads local UTC by pipeline latency (`LIVE_START_LEAD_S`) so signals on-air match real-time GPS for smartphone and A-GPS testing.
+- **Precise Ephemeris** — parse IGS SP3-c/d products with multi-GNSS Lagrange/Neville orbit and clock interpolation:
+  - *Analysis:* compare precise ground truth against realigned broadcast orbits (`/api/precise/compare`).
+  - *Generation:* MGEX SP3-driven generation on the native engine, or least-squares Keplerian fit (4 h arc, sub-metre residuals) into broadcast records. Auto-downloads free IGS/MGEX rapid products for scenario epochs.
+- **Operations Support** — persistent JSONL audit trail, multi-operator `/ws/events` WebSocket feed, real-receiver NMEA feedback (UDP/serial), named presets, and optional API-key RBAC.
 
 ---
 
 ## Why this project
 
-`gps-sdr-sim` produces a signal; it does not tell you how good that signal
-is. This workbench wraps generation with the parts a test rig needs:
+Many signal generators emit raw samples without self-validation tools. This workbench wraps generation with everything a test rig needs:
 
-- **Observable** — every stage is inspectable (spectrum, acquisition,
-  receiver fix, decoded LNAV), and every RF action is logged.
-- **Reproducible** — scenarios and trajectories are saved by name; a live
-  session's exact event stream can be recorded and replayed.
-- **Honest about fidelity** — by default the signal is built from
-  *broadcast* ephemeris whose epoch is only realigned (`toc`/`toe`
-  stamped) to the requested start, and the precise subsystem *measures*
-  the resulting error rather than hiding it. When you need the geometry to
-  be right, precise mode fits the SP3 track into the broadcast records so
-  the IQ is genuinely precise-driven — and the README says exactly which
-  path produced a given recording (`meta.json` records `ephemeris_mode`
-  and the per-PRN fit residual).
+- **Observable** — every stage is inspectable (spectrum, acquisition, receiver fix, decoded nav frames), and every RF transmission is audited.
+- **Reproducible** — scenarios and trajectories are saved by name; a live session's exact event stream can be recorded and replayed bit-for-bit.
+- **Honest about fidelity** — broadcast mode realigns ephemeris epochs and reports the resulting orbit drift against precise products rather than hiding it. Precise mode propagates satellites directly from MGEX SP3 products or records per-PRN fit residuals in `meta.json`.
+- **Standards-Compliant** — signal coding, navigation structures, and FEC polynomials strictly adhere to official ICDs (IS-GPS-200, Galileo OS SIS ICD, BeiDou ICD, RTCA DO-229 / ICAO Annex 10).
 
 ---
 
 ## Quick start
 
 ```sh
-./scripts/setup.sh          # builds gps-sdr-sim, creates .venv, installs deps
+./scripts/setup.sh          # sets up .venv, builds native SDR libraries (Pluto/bladeRF)
 ./scripts/run_server.sh      # serves http://127.0.0.1:8000
 ```
 
-`setup.sh` clones and compiles `gps-sdr-sim`, creates `.venv`, and runs
-`pip install -e ".[dev]"`. It then asks which SDR you'll transmit with —
-PlutoSDR/AD936x IIO clone, bladeRF, or both (skip the prompt with
-`SDR_KIND=pluto|bladerf|both ./scripts/setup.sh`, e.g. for CI) — and builds
-only that backend's native library from source into the venv's own prefix:
-`libiio` (v0.25) + `libad9361-iio` (v0.4.0) for Pluto, `libbladeRF`
-(v2024.02) for bladeRF. Nothing touches a system directory, and
-`rm -rf .venv` removes them cleanly. Prerequisites: `cmake`, a C compiler,
-and `libusb`. Without them everything except hardware transmit still works.
+`setup.sh` creates `.venv`, runs `pip install -e ".[dev]"`, and builds native SDR libraries into the virtual environment prefix (`libiio` + `libad9361-iio` for Pluto, `libbladeRF` for bladeRF). Specify `SDR_KIND=pluto|bladerf|both` to skip interactive prompts.
 
-`run_server.sh` activates `.venv`, points `DYLD_LIBRARY_PATH` /
-`LD_LIBRARY_PATH` at the venv's `lib/`, and starts uvicorn. Override with
-`HOST=` / `PORT=`; extra args pass through (e.g. `--reload`). Enable
-transmit endpoints with `ALLOW_TX=1 ./scripts/run_server.sh`.
+`run_server.sh` activates `.venv`, sets dynamic library paths, and launches Uvicorn. Pass `ALLOW_TX=1 ./scripts/run_server.sh` to enable hardware transmission.
 
 Run the test suite:
 
 ```sh
-.venv/bin/pytest -q
+pytest -q
 ```
 
 ---
@@ -165,517 +93,242 @@ Run the test suite:
 ## Architecture
 
 ```
-                map + time
-                    |
-       +------------+--------------------------------+
-       | ephemeris_mode = broadcast (default)        | ephemeris_mode = precise
-       v                                             v
-  broadcast RINEX nav                    IGS SP3 orbit/clock (interpolated)
-  (IGS/BKG mirror or upload)                          |
-       |                                  least-squares fit -> broadcast
-  toc/toe realigned to start              records (solved M0 + perturb.,
-       |                                  4 h arc, sub-metre residual)
-       +------------------+--------------------------+
-                          v
-                    RINEX-2 nav file
-                          |
-                          v
-                    gps-sdr-sim  ------------->  raw IQ + meta.json
-                          |                           |
-                          |                  +--------+--------+
-                          v                  v                 v
-                  software receiver     spectrum /        transmit (opt-in,
-                  least-squares fix     acquisition /     cabled only) / live
-                          |             LNAV decode       segment regeneration
-                          v
-                   fix error vs marker
-
-  precise SP3 orbit/clock  --(analysis)-->  /api/preview, /api/precise/compare
-  (also drives generation                   per-PRN delta vs realigned broadcast
-   in precise mode, above)
+                 map marker / trajectory route + time
+                                  |
+       +--------------------------+--------------------------+
+       | ephemeris_mode = broadcast                          | ephemeris_mode = precise
+       v                                                     v
+  broadcast RINEX nav                                   IGS MGEX SP3 orbit/clock
+  (IGS/BKG mirror or upload)                            (auto-downloaded rapid/final)
+       |                                                     |
+  realigned / real broadcast epoch                           | direct state propagation
+  (toe/toc grid, IODnav preserved)                           | or 4 h Keplerian fit
+       +--------------------------+--------------------------+
+                                  v
+                       Native C++20 Signal Engine
+                     (libgnsssynth via ctypes ABI)
+                                  |
+           +----------------------+----------------------+
+           |                                             |
+           v                                             v
+     File Generation                               Live Session (Start Now)
+  (multi-band IQ + meta.json)                   (in-memory ring buffer, 1 s chunks)
+           |                                             |
+     +-----+-----+                                 +-----+-----+
+     v           v                                 v           v
+  Inspect     Software Receiver                 SDR Transmit  SSE Diagnostics
+(spectrum,   (LS/WLS fix, blind                 (Pluto/bladeRF, (waterfall, C/N0,
+ acquisition, nav decode: LNAV,                  cabled only)    timeline steps)
+ correlation) I/NAV, B1I, SBAS)
 ```
 
-**`gps-sdr-sim` always consumes a RINEX-2 broadcast Keplerian nav file** —
-there is no satellite-state interface into it. In broadcast mode that file
-is the realigned daily BRDC; in precise mode it is a record set whose
-parameters were *solved* against the SP3 track, so the states gps-sdr-sim
-propagates match the precise product. The analysis endpoints
-(`/api/preview` precise, `/api/precise/compare`) still report the
-broadcast-vs-precise delta so the realignment error stays visible.
+### Repository Structure
 
 ```
 backend/
-  app.py            FastAPI app: all HTTP + WS endpoints, SSE streams, TX slots
-  config.py         env-var config, constants, data/out/log/precise dir creation
-  scenario.py       ScenarioRequest, gps-sdr-sim argv builder
-  generator.py      runs gps-sdr-sim (full run + short live segments)
-  geometry.py       WGS84 / ECEF / ENU, constellation geometry, transmit-time solve
-  gpstime.py        GPSTime dataclass, leap-second table, UTC<->GPS
-  signals.py        per-system L1 signal params (carrier, chip rate, code len, BOC, secondary code, GLONASS FDMA offsets)
-  inspector.py      IQ read, spectrum, C/A acquisition, correlation, compare (GPS L1 C/A; the self-validation reference)
-  auth.py           API-key role checks
-  ephem/            ephemeris.py (RINEX download/parse/realign/RINEX-2 writer),
-                    ephemeris_source.py (broadcast|precise selector, state fns),
-                    ephemeris_fit.py (SP3 track -> broadcast record set),
-                    eph_select.py, precise.py (SP3-c/d parser + multi-GNSS interp)
-  synth/            native C++ engine: Python orchestration + ctypes ABI
-    engine.py       multi-constellation run: geometry -> per-SV specs -> band planning -> meta.json
-    bands.py        splits visible SVs into RF bands (L1 group 1575.42 MHz, GLONASS G1 1602 MHz)
-    signal_engine.py  thin run() seam used by the API
-    _lib.py         ctypes bindings for backend/synth/native/libgnsssynth.dylib
-    fading.py       FadingConfig (model / environment / speed_mps / seed / key)
-    sbas.py glonass.py fs_policy.py   state helpers, FDMA, sample-rate policy
-    native/         C++20: code generation, NCOs, mixing, quantisation, block streaming, land-mobile-satellite channel (ChaCha20)
-  models/           atmosphere.py, receiver_clock.py, multipath.py,
-                    channel_models.py (glue), impairments.py, error_budget.py, wls.py
-  analysis/         receiver.py (LS fix), reference.py + truth.py (independent
-                    cross-check refs), iq_integrity.py, lnav_display.py
-  rf/               transmit.py (TxParams incl. kind, streaming, underflow, cancel),
-                    device.py (standby control link, kind-keyed), dual_tx.py (shared TX1/TX2 card)
-    backends/       ad9361.py (pyadi-iio) / bladerf.py (libbladeRF) -- duck-typed
-                    open_tx/set_gain/write/close/probe_open/probe_info per `kind`
-    frontend/       rf_frontend.py (LO-offset planning), calibration.py (TX quadrature
-                    cal), capabilities.py, diagnostic.py, nco.py
-  obs/              audit.py, ws_hub.py, receiver_feed.py, nmea.py, recording.py, provenance.py
-  store/            trajectory.py, trajectory_sim.py, scenario_lib.py  (named-preset storage)
-  session/          live.py  (LiveSession: segment regeneration, jog, time-shift)
+  app.py            FastAPI application: HTTP, WebSocket, SSE streams, TX slot management
+  config.py         Configuration constants, directory management, environment variables
+  scenario.py       ScenarioRequest dataclass, route interpolators, engine parameters
+  geometry.py       WGS84 ellipsoid normals, ECEF / ENU conversions, transmit-time solver
+  gpstime.py        GPSTime representation, leap-second tables, UTC <-> GPS conversions
+  signals.py        Per-system signal parameters (carriers, chip rates, code lengths, BOC, secondary codes)
+  inspector.py      IQ reader, FFT spectrum analyzer, multi-system acquisition and correlation
+  auth.py           API-key role-based access control (RBAC)
+  ephem/            Ephemeris handling:
+                    ephemeris.py (RINEX parse, realign, IODnav derivation, real-epoch preservation)
+                    ephemeris_source.py (broadcast vs precise selector, state evaluators)
+                    ephemeris_fit.py (SP3 track -> Keplerian broadcast record fitting)
+                    precise.py (SP3-c/d parser, Neville orbit and clock interpolation)
+  synth/            Native C++ synthesis engine:
+                    engine.py (Python orchestration, geometry -> SV specs -> multi-band planning)
+                    bands.py (band registry: L1 1575.42 MHz, GLONASS G1 1602 MHz, L2, L5)
+                    signal_engine.py (top-level run dispatcher)
+                    _lib.py (ctypes bindings for libgnsssynth)
+                    fading.py (Loo channel models, Jakes Doppler, ChaCha20 PRNG)
+                    sbas.py, glonass.py, fs_policy.py (helpers for FDMA and sample rates)
+                    native/ (C++20 source: PRN generators, NCO mixers, quantizers, LMS fading)
+  analysis/         Receiver verification and navigation message decoders:
+                    receiver.py (least-squares multi-GNSS solver, pseudorange extraction)
+                    inav_encode.py, inav_decode.py (Galileo E1 I/NAV FEC, framing, CRC-24Q)
+                    fnav_encode.py, fnav_decode.py (Galileo E5a F/NAV framing and SISA mapping)
+                    sbas_encode.py, sbas_decode.py (RTCA DO-229 SBAS L1 framing, MT 1-26, CRC-24Q)
+                    nav_encoders.py (unified navigation message dispatch)
+                    _viterbi.py, _crc.py, _bit_utils.py (convolutional FEC and CRC routines)
+  models/           Atmosphere (Klobuchar, Saastamoinen), receiver clock, multipath, RF impairments
+  rf/               Hardware transmission:
+                    transmit.py (SDR streaming, buffer management, underflow tracking)
+                    device.py (control links), dual_tx.py (TX1/TX2 arbitration)
+                    backends/ (ad9361.py via pyadi-iio, bladerf.py via libbladeRF)
+                    frontend/ (LO-offset planner, automatic TX quadrature calibration)
+  session/          live.py (LiveSession: in-memory streaming, time progression, jog, timeline)
 
-frontend/           vanilla JS, no build step; served static by FastAPI at /static
-  index.html        three pages: Channels, Trajectory Builder, Log
-  css/style.css
-  js/
-    channels.js     channel cards: config, start/stop, timeline, scrubber,
-                    scenario save/load, replay, advanced config sub-tabs
-                    (SP3 / RF impairments / Propagation / Signal engine)
-    map.js trajectory.js live.js pages.js app.js
-    plots.js skyplot.js iqplot.js   spectrogram, sky plot, IQ / spectrum plots,
-                    per-SV power bars, HiDPI canvas helper
-    fading.js       JS port of the native channel model (scrubbed power bars)
-    log.js          audit-log merge, /ws/events client, receiver-feed panel
+frontend/           Vanilla JavaScript and CSS (no build step required):
+  index.html        Single-page application (Channels, Trajectory Builder, Log)
+  js/channels.js    Channel configuration, generation, SDR streaming, advanced sub-tabs
+  js/compare.js     Interactive broadcast vs precise ephemeris visualizer
+  js/skyplot.js     Multi-constellation skyplot and satellite selection
+  js/iqplot.js      Waveform scrubber, multi-band spectrum, and acquisition waterfall
 ```
-
-**Transport:** long-running generate / transmit / replay stream Server-Sent
-Events; the multi-operator feed is a WebSocket; everything else is JSON over
-HTTP. **Concurrency:** at most two transmit slots (`TX1`, `TX2`); audit
-appends are lock-serialized. **Tech stack:** Python ≥ 3.10, FastAPI +
-uvicorn, NumPy, `georinex`, `pyadi-iio` + `bladerf` (transmit only, one
-per `kind`), `gps-sdr-sim` (C,
-built from source), the native engine (C++20, built from source into
-`backend/synth/native/libgnsssynth.dylib`, loaded via `ctypes` — no Python
-extension module); dependency-free vanilla JS plus Leaflet from a CDN.
 
 ---
 
 ## Ephemeris and accuracy modes
 
-Set with `ephemeris_mode` on `/api/generate`, `/api/live/start`, and
-`/api/preview` (`"broadcast"` default, or `"precise"`).
+Set via `ephemeris_mode` on `/api/generate`, `/api/live/start`, and `/api/preview` (`"broadcast"` default, or `"precise"`).
 
-| Mode | Where it applies | What it means |
-|------|------------------|---------------|
-| **Broadcast** (default) | generation + analysis | The daily broadcast RINEX nav file, with every satellite's `toc`/`toe`/`gps_week` **stamped** to the requested start so `gps-sdr-sim`'s validity-window check passes. M0 and the perturbations are left untouched — a broadcast-compatibility mechanism, not a precise ephemeris — so orbit error grows as the requested start moves away from the real broadcast epoch. |
-| **Precise (SP3), analysis** | `/api/preview`, `/api/precise/compare` | An IGS SP3-c/d orbit/clock product, interpolated (~10th-order Neville for position, analytic derivative for velocity, linear for the coarse SP3 clock). Reports the per-PRN broadcast-vs-precise delta. |
-| **Precise (SP3), generation — `gps-sdr-sim`** | `/api/generate`, `/api/live/start` | `ephemeris_fit.py` least-squares fits the interpolated SP3 track (position over a 4 h arc, `toe` ± 2 h) into a broadcast record set — solving M0, `delta_n`, the rate terms and the six harmonic corrections, plus `af0/af1/af2` against the SP3 clock. The fitted records go to `gps-sdr-sim` with **no realignment**, so the satellite states behind the IQ match the SP3 product to sub-metre. Fit residuals land in `meta.json` (`precise_fit`); a fit that cannot get under ~2 m is an error, not a silent bad nav file. GPS only. |
-| **Precise (SP3), generation — `native`** | `/api/generate` with `engine=native` | The native engine propagates each satellite's state directly from the MGEX SP3 product at run time (no Keplerian re-fit), for GPS + GLONASS + Galileo + BeiDou + QZSS together. A GPS-only SP3 product (or a network with no reachable MGEX mirror) degrades to the systems it covers, with the omission named in `warnings`; `meta.json` records `provenance.ephemeris = "precise"`. |
+| Mode | Where it applies | Description |
+|------|------------------|-------------|
+| **Broadcast** (default) | Generation & analysis | Daily broadcast RINEX nav file. For epochs within ±4 hours of broadcast records, true ephemerides and original IODs are preserved. Outside that window, epochs are cleanly aligned to the start time on standard grid steps with derived IODnav parameters. |
+| **Precise (SP3), analysis** | `/api/preview`, `/api/precise/compare` | Interpolated IGS SP3-c/d orbit/clock reference (~10th-order Neville polynomial for position, analytic derivative for velocity). Evaluates per-PRN radial/along/cross position deltas, clock offsets, and pseudorange errors. |
+| **Precise (SP3), generation** | `/api/generate`, `/api/live/start` | Propagates satellite states directly from MGEX SP3 products at runtime across GPS, GLONASS, Galileo, BeiDou, and QZSS. When fitting into broadcast format, `ephemeris_fit.py` executes a least-squares solve over a 4 h arc with sub-metre residuals. |
 
-When precise mode is requested and no loaded SP3 product covers the start
-time, the server auto-downloads the best free product for that GPS day *and
-the day either side* (`PRECISE_SP3_MIRRORS`), merges them, and loads the
-result — no file to place, no button to press. Mirrors are probed until a
-product carries every requested system; GFZ's MGEX rapid
-(`GBM0MGXRAP`, anonymous FTP, full GRECJ, published the next day) comes
-first, then ESA's operational orbits (GPS + GLONASS only), IGN and the
-GPS-only IGS archives. The systems are read from the file, and the cache
-name lists them (`…_GRECJ.sp3`, `…_GR.sp3`, `…_G.sp3`), so a partial
-product never shadows a later request for more. Systems no product carries
-are dropped with a warning that names them. Days that have not ended are
-not requested, and a host that refuses or times out a connection is
-skipped for 10 minutes instead of costing a 30 s timeout per file.
-
-For epochs too recent for a daily product (today, usually yesterday) the
-newest ultra-rapid solution issued at least 3 h before the start is used
-instead (`PRECISE_SP3_ULTRA_MIRRORS`: GFZ every 3 h with GPS + GLONASS +
-Galileo, ESA every 6 h with GPS + GLONASS); its second day is *predicted*,
-so a warning is added. No anonymous ultra-rapid product carries BeiDou or
-QZSS.
-
-The three-day merge matters because a single one-day SP3 file
-cannot supply a centred ~11-point interpolation window when the start
-sits within ~3 h of its 00:00/24:00 edge (the fit arc is `toe ± 2 h`). If
-a neighbour day is not published yet the run still proceeds, with a
-warning, on an off-centre window. A manually loaded product covering the
-epoch is reused as-is. Set `PRECISE_SP3_MIRRORS=""` to disable downloads.
-
-Precise mode fails explicitly rather than silently degrading:
-
-- No SP3 product could be obtained for the epoch (auto-download disabled or
-  failed, none loaded), the epoch is outside a manually loaded product's
-  interval, or a fit that will not converge below tolerance → **HTTP 422**,
-  unless the caller passes `fallback_to_broadcast: true` (which then uses
-  broadcast with a warning that names what failed).
-- A PRN absent from the SP3 product is **omitted and named in `warnings`**,
-  never silently replaced with a broadcast value.
-- No extrapolation past the product's edge epochs.
-
-`/api/precise/compare` reports, per PRN, the position delta (with
-radial/along/cross components), clock delta, range and pseudorange delta,
-Doppler delta, and elevation, plus an RMS summary — broadcast(realigned)
-minus precise. With `sweep_s`/`step_s` in the body it repeats the
-comparison across the scenario duration and returns a per-PRN `series`.
-The browser panel sends the sweep automatically and renders it with
-`frontend/compare.js` in a dedicated full-width region below the config
-row (not squeezed into the narrow sim column): a plain-language verdict
-("broadcast ranges sit ~N m off precise, ≈ X% of one GPS code chip") plus
-a colour-graded recommendation, summary cards, and — in a responsive grid
-— a per-PRN radial/along/cross bar chart, a per-PRN clock-offset bar
-chart, and an interactive time-sweep line chart (per-PRN toggles, metric
-selector, hover readout). Charts are drawn at the display's pixel density
-and stacked full width. No RMS jargon and no text to scroll. The region
-has a Hide button, and pressing Compare again with the position, time,
-RINEX path and sweep unchanged re-opens the last result from memory
-instead of recomputing.
+When precise mode is enabled, the server auto-downloads the best available SP3 product for the scenario epoch across configured mirrors (`PRECISE_SP3_MIRRORS`: GFZ MGEX rapid `GBM0MGXRAP`, ESA, IGN, IGS). If no daily product is published yet (e.g. current day), the newest ultra-rapid product (`PRECISE_SP3_ULTRA_MIRRORS`) is used.
 
 ---
 
 ## The UI
 
-Three pages, switched from the left sidebar.
+The frontend is organized into three main views accessible from the sidebar:
 
-**Channels** — one card per transmit channel (up to two):
+### 1. Channels
+Each channel card controls an independent transmission channel (up to two slots: TX1 and TX2):
+- **Hardware Config:** Device URI, SDR Kind (Pluto or bladeRF), TX Slot, LO Frequency (with Auto resolution), TX Gain (−50 dB default), Dry Run, Auto-Stop timeout, Session Recording.
+- **Simulation Config:** Map reference position, Start UTC, Duration, Sample Rate (auto-resolves lowest rate for chosen constellations), Format (`int16` / `int8`), RINEX path (`AUTO` or manual).
+- **Constellation & Band Selector:** Freely toggle GPS, GLONASS, Galileo, BeiDou, QZSS, SBAS, and NavIC, and select RF bands (L1, L2, L5). GPS is not mandatory.
+- **Advanced Sub-Tabs:**
+  - **SP3:** Manual SP3 loading and interactive broadcast-vs-precise comparison charts.
+  - **RF Impairments:** CFO, sample clock drift, phase noise, IQ imbalance, DC offset, AWGN.
+  - **Propagation:** Atmospheric models (Klobuchar / Saastamoinen), receiver clock dynamics, specular multipath.
+  - **Signal Engine:** Sample rate overrides, quantization bits, land-mobile-satellite channel fading (environment, speed, seed/key).
+- **Inspection & Diagnostics:** Constellation skyplot, multi-band RF spectrum, acquisition correlation peak, IQ waveform scrubber, LNAV/INAV decode table, live spectrogram, and C/N0 trends.
+- **Transmission Controls:**
+  - `Generate`: Pre-computes full scenario IQ files to disk.
+  - `Start`: Replays pre-computed scenario files to SDR hardware.
+  - `Start Now`: Initiates direct in-memory live streaming without disk I/O.
+  - `Stop`: Immediately terminates active transmission.
 
-- *Hardware config* — SDR kind (Pluto / IIO clone or bladeRF), Device URI,
-  LO frequency (default 1575.42 MHz), TX gain dB (default −50), *Dry run*,
-  *Auto-stop after (s)*, *Record this session*.
-- *Simulation config* — map marker, Start UTC, Duration, Sample rate,
-  Format (int16 / int8), RINEX (`AUTO` or a path).
-- *Ephemeris* — Broadcast (realigned) / Precise (SP3-fitted) selector,
-  applied to Generate and live runs.
-- *Advanced config* — one row of sub-tabs, at most one open at a time,
-  each height-capped with its own scroll so opening one never stretches
-  the page: **SP3** (load a local product, compare vs broadcast),
-  **RF impairments**, **Propagation** (receiver models), **Signal engine**
-  (engine picker, constellation checkboxes, quantisation, channel model).
-- *Scenario library* — save/reload the card's config by name.
-- *Timeline* — `jog` / `time_shift` steps that fire at `t + N` s.
-- *Inspect panels* — IQ waveform + spectrum with a playback scrubber
-  (debounced, stale responses dropped), every RF band's spectrum overlaid
-  on one absolute-frequency axis, per-satellite signal-power bars (real
-  acquisition metric for a GPS-only run; elevation-taper + channel gain
-  across all constellations for a multi-GNSS run, redrawn as the scrubber
-  moves), spectrogram waterfall, C/N0 trend, sky plot, LNAV decode.
-- *Live manipulation* — jog buttons and GPS time-of-week shift while a live
-  session runs.
-- *Start / Stop*, with a type-to-confirm gate and the mandatory
-  "isolated / cabled setup confirmed" checkbox. **Start All** starts every
-  configured channel.
+### 2. Trajectory Builder
+Draw multi-waypoint routes on the map, configure velocities, view elevation profiles, and apply dynamic trajectories directly to channel simulations.
 
-**Trajectory Builder** — draw a waypoint route on the map, edit the point
-table, **Save as…**, **Open**, **Apply to channel** as a dynamic scenario.
-
-**Log** — Real Receiver Feedback (UDP or serial NMEA, latest parsed fix)
-and the Event list: the persistent audit trail merged with the live
-`/ws/events` feed, newest first.
+### 3. Log
+Displays the persistent JSONL audit trail merged with the live `/ws/events` WebSocket stream, alongside real-time NMEA receiver feedback (UDP/serial).
 
 ---
 
 ## Typical workflows
 
-**Generate and verify (no RF)**
+### Generate and verify (no RF hardware required)
+1. Select reference coordinates on the map, set Duration to 300 s, Sample Rate to `auto`, and select desired constellations (e.g., GPS + Galileo + SBAS).
+2. Click **Generate**. Progress is streamed live via SSE.
+3. Inspect the resulting spectrum and skyplot, scrub through the IQ waveform, and examine acquisition metrics.
+4. Run the internal receiver solve (`POST /api/receiver`) to verify position fixes within nominal tolerances of the marker.
 
-1. Click the map to set the marker, Start UTC = now, Duration 300 s,
-   sample rate `auto`, int16, RINEX `AUTO`. The native engine is the
-   default; `auto` picks the lowest rate that holds the selected systems
-   (2.6 Msps for GPS alone, 5 Msps with Galileo, 20 Msps once BeiDou B1I
-   shares the L1 output) and the size estimate shows it. An explicit rate
-   too low for the selection is raised with a warning.
-2. **Generate.** The inspect table shows measured vs. predicted Doppler /
-   code phase per PRN.
-3. Scrub the IQ plot; check spectrogram and sky plot.
-4. Run the internal receiver check (`POST /api/receiver`) — expect a fix
-   within ~100 m of the marker.
+### Real-time live transmission (`Start Now`)
+1. Connect SDR TX to the receiver RF input via **≥ 40 dB in-line attenuation** (cabled setup only).
+2. Set Device URI (e.g., `ip:192.168.3.1`) and select SDR kind (`pluto` or `bladerf`).
+3. Check `Live: now` to synchronize with current real-world GPS time (essential for smartphones and A-GPS receivers).
+4. Uncheck `Auto-stop after duration` to allow continuous streaming indefinitely, or specify an auto-stop duration.
+5. Confirm the isolated setup prompt and click **Start Now**. The signal is synthesized directly in memory and streamed via DMA without disk bottlenecks.
+6. Use the **Live Manipulation** tab to jog coordinates or shift GPS time on-the-fly.
 
-**Quantify ephemeris error**
-
-1. Run a precise **Preview** for your lat/lon/time — this auto-downloads
-   the SP3 product for that epoch. Then **Compare vs broadcast** in the
-   precise panel — the result is charted (radial/along/cross bars, clock
-   bars, and a time-sweep line chart with per-PRN toggles), showing how
-   far a *broadcast*-mode recording's geometry sits from the precise
-   reference. (Load a specific SP3 by path first only to pin one.)
-
-**Precise-geometry generation**
-
-1. Set the card's Ephemeris selector to **Precise (SP3-fitted)** and
-   **Generate**. The SP3 product for the scenario epoch is downloaded and
-   loaded automatically (no file to place); a specific local SP3 loaded by
-   path is used instead if present.
-2. The `done` event and `meta.json` (`precise_fit`) report the per-PRN fit
-   residual; an epoch with no obtainable product, or a fit that will not
-   converge, fails with HTTP 422 instead of falling back silently.
-
-**Cabled hardware replay**
-
-1. Start with `ALLOW_TX=1`. Generate a scenario.
-2. Connect SDR TX to the receiver antenna port through **≥ 40 dB** in-line
-   attenuation. Cabled or shielded only.
-3. Set Device URI, LO 1575.42 MHz, sample rate `auto` (or a rate the
-   selection fits in -- live TX rejects one that is too low), TX gain −50 dB, tick
-   "isolated / cabled setup confirmed", **Start**.
-4. Record TTFF, reported position vs. marker, sustained underflow count.
-
-**Live walk**
-
-1. Start a **live** session (position/time editable while running).
-2. Use jog buttons or pre-load a **Timeline**.
-3. Tick **Record this session**; replay it later at 1× / 2× with no hardware.
+### Ephemeris error analysis
+1. Perform a **Preview** for a specific epoch to auto-download the MGEX SP3 product.
+2. Click **Compare vs broadcast** to open the full-width comparison dashboard, visualizing radial/along-track/cross-track errors, satellite clock offsets, and pseudorange deltas.
 
 ---
 
 ## API
 
-Base URL `http://127.0.0.1:8000`. Long operations stream Server-Sent Events;
-`/ws/events` is a WebSocket; everything else is JSON over HTTP. When
-`API_KEYS_JSON` is set, endpoints below marked *operator* need an operator
-key in `X-API-Key`; a transmit *stop* never does.
+Base URL: `http://127.0.0.1:8000`. Long operations stream Server-Sent Events (SSE); `/ws/events` provides a WebSocket event feed; all other endpoints consume and return JSON.
 
 | Group | Endpoints |
 |-------|-----------|
-| Health / preview | `GET /api/health`, `POST /api/preview` (accepts `ephemeris_mode`, `fallback_to_broadcast`, `systems` — multi-GNSS geometry preview), `POST /api/preview_track` |
-| Ephemeris | `POST /api/rinex/upload` |
-| Precise (analysis) | `GET /api/precise/status`, `POST /api/precise/load` *(operator)*, `POST /api/precise/compare` |
-| Generate / inspect | `POST /api/generate` (SSE; accepts `ephemeris_mode`, `fallback_to_broadcast`, `engine` (`gps-sdr-sim`｜`native`), `systems`, `fading`, `sample_format` int16/int12/int8), `POST /api/receiver`, `GET /api/iqplot` (per-RF-band breakdown when multi-band), `GET /api/correlation`, `GET /api/lnav` |
-| Transmit *(needs `ALLOW_TX=1`)* | `POST /api/transmit` (SSE, operator; accepts `kind` — `pluto`｜`bladerf`), `POST /api/transmit/stop`, `POST /api/live/start` (SSE, operator; accepts `kind`, plus `target_rf_frequency_hz`/`lo_offset_mode`/`lo_offset_hz` when `RF_FRONTEND_ENABLED=1`), `POST /api/live/jog|time_shift` *(operator)*, `POST /api/live/stop` |
-| Device *(needs `ALLOW_TX=1`)* | `POST /api/device/connect|disconnect` *(operator; accepts `kind`)*, `GET /api/device/status` |
-| Recording | `GET /api/recording/list`, `GET /api/recording/replay` (SSE) |
-| Receiver feedback | `POST /api/receiver/listen|stop_listen|inject` *(operator)*, `GET /api/receiver/fix` |
-| Presets | `POST/GET/GET /api/trajectory/save|list|load`, `POST/GET/GET /api/scenario/save|list|load` (saves are *operator*) |
-| Observability | `GET /api/audit`, `WS /ws/events` |
-
-Full request/response bodies, roles, and error codes are documented inline
-in `backend/app.py` route handlers.
+| **Health & Preview** | `GET /api/health`, `POST /api/preview`, `POST /api/preview_track` |
+| **Ephemeris** | `POST /api/rinex/upload`, `GET /api/precise/status`, `POST /api/precise/load`, `POST /api/precise/compare` |
+| **Synthesis & Inspection** | `POST /api/generate` (SSE), `POST /api/receiver`, `GET /api/iqplot`, `GET /api/correlation`, `GET /api/lnav` |
+| **Hardware Transmission** | `POST /api/transmit` (SSE), `POST /api/transmit/stop`, `POST /api/live/start` (SSE), `POST /api/live/stop`, `POST /api/live/jog`, `POST /api/live/time_shift` |
+| **Device Control** | `POST /api/device/connect`, `POST /api/device/disconnect`, `GET /api/device/status` |
+| **Session & Presets** | `GET /api/recording/list`, `GET /api/recording/replay` (SSE), `POST/GET /api/trajectory/*`, `POST/GET /api/scenario/*` |
+| **Observability** | `GET /api/audit`, `WS /ws/events`, `POST /api/receiver/listen`, `GET /api/receiver/fix` |
 
 ---
 
 ## Configuration
 
-All via environment variables (see `backend/config.py`).
+Configured via environment variables (see `backend/config.py`):
 
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `ALLOW_TX` | `0` | Master switch for every transmit endpoint. Off ⇒ HTTP 403. |
-| `DEVICE_URI` | `ip:192.168.3.1` | Default SDR URI: LibreSDR over GbE; `ip:192.168.2.1` is its USB-NCM link (`pyadi-iio` for `kind=pluto`, a bladeRF device identifier for `kind=bladerf`, e.g. `*:serial=...`). |
-| `RF_FRONTEND_ENABLED` | `0` | Enables the LO-offset planner + auto TX quadrature calibration (`target_rf_frequency_hz`/`lo_offset_mode`/`lo_offset_hz` on transmit/live-start). |
-| `DEFAULT_SAMPLE_RATE` | `2600000` | Default IQ sample rate (Hz). |
-| `DEFAULT_FORMAT` | `int16` | Default sample format (`int16` / `int8`). |
-| `DATA_DIR` | `./data` | RINEX cache, saved trajectories & scenarios. |
-| `OUT_DIR` | `./out` | Generated IQ + `meta.json`, recordings. Served at `/out`. |
-| `LOG_DIR` | `./logs` | `audit.jsonl`. |
-| `PRECISE_DIR` | `./data/precise` | SP3 product cache / load directory. Git-ignored — products are downloaded at run time, never committed. |
-| `PRECISE_SP3_MIRRORS` | free anonymous mirrors: GFZ MGEX rapid (GRECJ, FTP), ESA navigation-office, IGN MGEX rapid → final, then GPS-only IGS0OPS rapid → final → ultra-rapid | Comma-separated SP3 URL templates (`{gpsweek}`/`{gps_week}`/`{dow}`/`{yyyy}`/`{doy}`/`{wwwwd}`/`{hh}`). Tried in order until a product carries every requested system, else the one covering most is kept (`ftp://` templates are fetched with urllib). Used by an explicit `POST /api/precise/load` with `download` and by the auto-fetch on the precise `/api/preview` and `/api/generate` paths. Cached per day, tier and coverage (`IGS_wwww_d_{RAP,FIN,ULT}_<systems>.sp3`, e.g. `_GRECJ`, `_GR`); delete the file to force a refresh. Set to `""` to disable all downloads. |
-| `PRECISE_SP3_ULTRA_MIRRORS` | GFZ ultra-rapid (FTP, 3-hourly, G/R/E), ESA ultra-rapid (6-hourly, G/R) | Ultra-rapid templates (`{gpsweek}`/`{dow}`/`{yyyy}`/`{doy}`/`{hh}` of the solution's first epoch) for epochs no daily product covers yet; the newest listed solution issued ≥ 3 h before the start wins. `""` disables the fallback. |
-| `GPS_SDR_SIM_BIN` | `./gps-sdr-sim/gps-sdr-sim` | Path to the built binary. |
-| `API_KEYS_JSON` | `""` | JSON `{"<key>": "operator"｜"viewer"}`. Empty ⇒ auth disabled. |
-| `HOST` / `PORT` | `127.0.0.1` / `8000` | uvicorn bind (via `run_server.sh`). |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ALLOW_TX` | `0` | Master switch for RF transmission. Set `1` to enable transmit endpoints. |
+| `DEVICE_URI` | `ip:192.168.3.1` | Default SDR URI (`pyadi-iio` URI for PlutoSDR, bladeRF identifier for bladeRF). |
+| `RF_FRONTEND_ENABLED` | `0` | Enables LO-offset planning and automatic TX quadrature calibration. |
+| `DEFAULT_SAMPLE_RATE` | `2600000` | Default fallback sample rate in Hz. |
+| `DEFAULT_FORMAT` | `int16` | Default complex sample quantization (`int16`, `int12`, `int8`). |
+| `DATA_DIR` | `./data` | Cache directory for RINEX files, trajectories, and presets. |
+| `OUT_DIR` | `./out` | Storage directory for generated IQ files and metadata. |
+| `LOG_DIR` | `./logs` | Storage directory for `audit.jsonl`. |
+| `PRECISE_DIR` | `./data/precise` | Cache directory for downloaded IGS/MGEX SP3 products. |
+| `PRECISE_SP3_MIRRORS` | GFZ, ESA, IGN, IGS mirrors | Comma-separated URL templates for downloading SP3 products. |
+| `PRECISE_SP3_ULTRA_MIRRORS` | GFZ, ESA ultra-rapid | Fallback templates for near-real-time ultra-rapid SP3 orbits. |
+| `API_KEYS_JSON` | `""` | JSON map for RBAC: `{"<key>": "operator"｜"viewer"}`. |
+| `HOST` / `PORT` | `127.0.0.1` / `8000` | Uvicorn server bind address and port. |
 
 ---
 
 ## Access control
 
-Off by default. Set `API_KEYS_JSON` to switch it on:
+RBAC is disabled by default. Enable by defining `API_KEYS_JSON`:
 
 ```sh
-API_KEYS_JSON='{"s3cret-op":"operator","read-only":"viewer"}' ALLOW_TX=1 ./scripts/run_server.sh
+API_KEYS_JSON='{"secret-op":"operator","viewer-key":"viewer"}' ALLOW_TX=1 ./scripts/run_server.sh
 ```
 
-- **operator** — start/stop transmit, jog, script timelines, connect the
-  device link, listen for receiver feedback, load SP3 products, save presets.
-- **viewer** — read-only: status, audit, replay, preview, compare. May also
-  *stop* a transmit (safety-positive — any valid key can issue one).
-
-The browser sends the key as `X-API-Key`; the UI's 🔑 button stores it in
-`localStorage`. When `API_KEYS_JSON` is empty, every check is a no-op.
+- **operator** — authorized to start/stop transmissions, jog live sessions, script timelines, connect hardware, and load SP3 products.
+- **viewer** — read-only access (status, preview, audit logs, replays). May issue transmission *stop* commands for safety.
 
 ---
 
 ## Safety
 
-**Do not transmit RF over the air.** Operation outside an authorized,
-controlled test environment may violate spectrum regulations and can
-interfere with GNSS receivers that safety-critical systems depend on.
+> ⚠️ **Do not transmit RF over the air.**
 
-If RF replay is required:
+Unlicensed over-the-air transmission on GNSS frequencies violates spectrum regulations and creates severe hazards for safety-critical aviation, maritime, and telecommunications infrastructure.
 
-- Use only a fully shielded (Faraday) or conducted / cabled setup.
-- Feed a receiver over cable with **low TX gain (−40 to −60 dB)** plus
-  **30–60 dB in-line attenuation**.
-- Transmit is refused (HTTP 403) unless **both** `ALLOW_TX=1` **and** the
-  per-channel "isolated / cabled setup confirmed" checkbox are set.
-- `POST /api/device/connect` opens a control link only — RF begins solely
-  when a transmit starts.
-- Use `max_duration_s` (Auto-stop) so a transmit can't run unattended.
-
-Responsibility for lawful, authorized operation rests entirely with the
-operator; the authors accept no liability for misuse.
+- **Conducted Testing Only:** Always connect the SDR output directly to the receiver antenna port via coaxial cable.
+- **Mandatory In-Line Attenuation:** Insert **30 to 60 dB** of fixed RF attenuation between SDR TX and receiver input, and keep software TX gain low (−40 to −60 dB).
+- **Safety Interlocks:** Transmissions require `ALLOW_TX=1` and explicit confirmation of an isolated setup in the UI modal (`confirm_isolated`).
+- **Fail-Safe Timeouts:** Configure `max_duration_s` so unattended transmissions terminate automatically.
 
 ---
 
 ## Testing
 
+Run the test suite across unit, integration, and validation layers:
+
 ```sh
-.venv/bin/pytest -q
+pytest -q
 ```
 
-**860+ tests** as of this writing (a few `xfail` need real SDR hardware).
-Coverage spans ephemeris
-alignment, GPS-time conversions, the SP3 parser and multi-GNSS orbit/clock
-interpolation, the broadcast/precise mode selector, the SP3→broadcast
-fit (pure-Kepler recovery to millimetres, SP3-fixture fit, RINEX-2
-serialisation), precise generation wiring (both engines), geometry, the
-native engine (per-system code generation, NCO/mixer continuity, BOC and
-secondary codes, GLONASS FDMA epoch, multi-constellation acquisition,
-channel model statistics and JS parity, band planning, C++/Python constant parity), acquisition,
-the receiver solve, LNAV decode, the live session, transmit plumbing for
-both the Pluto and bladeRF backends (mocked hardware), the RF-frontend
-LO-offset planner and TX quadrature calibration, the device link, audit,
-RBAC, NMEA parsing,
-recording/replay, the scenario library, the WebSocket hub, the frontend
-assets, and the precise-ephemeris HTTP endpoints. The 4 `xfail` cases
-need real SDR hardware. The suite uses fixtures and mocks only — no
-network downloads.
-
-`tests/` is organised into flat integration tests plus `unit/`,
-`validation/` (independent cross-checks — see below), and `regression/`
-(deterministic-output and provenance guards).
-
-### Self-consistency / validation layer
-
-A set of software-only checks that do not need hardware or the real
-`gps-sdr-sim` binary:
-
-- **Independent geometry reference** (`backend/analysis/reference.py`) — a
-  from-scratch IS-GPS-200 broadcast propagator (different anomaly solver,
-  analytic velocity, rotation-matrix ECEF, own Sagnac loop) and a
-  least-squares-polynomial SP3 interpolator. The validation tests compare
-  the production path against this, never against itself.
-- **Canonical truth model** (`backend/analysis/truth.py`) — one conversion path
-  from (lat/lon/alt, UTC start, duration) to ECEF, GPS week/sow, and
-  truth observables, shared by the generator and the validator.
-- **`scripts/validate_scenario.py`** — chains ephemeris → geometry vs
-  reference → generation → IQ integrity → acquisition → weighted receiver
-  fix → nominal error budget and prints a human or `--json` PASS/FAIL
-  report. `--no-generate` runs the geometry/budget stages only.
+The test suite contains **880+ automated tests** covering:
+- C++ native engine ABI bindings, multi-band planning, and NCO phase continuity.
+- Signal codes across GPS (L1/L2/L5), Galileo (E1/E5a), BeiDou (B1I/B2a), GLONASS (FDMA), QZSS, SBAS, and NavIC.
+- FEC and CRC routines (Viterbi rate-1/2, DO-229 CRC-24Q, Galileo I/NAV framing).
+- RINEX download, parsing, realignments, and SP3 orbit/clock interpolation.
+- End-to-end multi-GNSS software receiver fixes and blind navigation message decoding.
+- Live in-memory streaming, thread safety, timeline actions, and continuous time progression.
+- Hardware transmit backends (PlutoSDR and bladeRF mocks), LO planners, and audit logs.
 
 ---
 
 ## Accuracy and limitations
 
-- **Broadcast mode realigns, it does not propagate.** `toc`/`toe` are
-  stamped to the requested start; M0 and the perturbations are not, so
-  orbit error grows the further the start is from the real broadcast
-  epoch. Use the precise compare to quantify it, or precise generation to
-  avoid it.
-- **Precise generation is orbit-accurate, not a time standard.** The
-  fitted records reproduce the SP3 *position* track to sub-metre over the
-  fit arc, but the clock comes from the SP3 product's coarse clock
-  (linearly interpolated) fitted to `af0/af1/af2` — good to a few ns, not
-  a sub-nanosecond source. Iono/tropo/multipath are not part of the fit;
-  they reach the IQ only through the opt-in channel models. On
-  `gps-sdr-sim`, ionosphere comes via its `-i` flag, receiver clock and
-  multipath via the quasi-static `_apply_channel` post-process, and
-  troposphere does not reach the IQ at all. On the native engine,
-  ionosphere and troposphere are always in the IQ, per satellite and per
-  band. The receiver clock is exact per satellite and band through the
-  trajectory knots. Multipath and the RF impairments are streamed over
-  every band file by `backend/synth/postproc.py`, and no clean copy is
-  kept, because the same request without them regenerates it.
-- **The fit arc is 4 h.** Precise generation needs an SP3 product whose
-  epochs cover the scenario start ± 2 h; outside that it returns HTTP 422.
-- **L1 multi-GNSS receiver fix and standalone blind nav decode:** The built-in software receiver solves an end-to-end multi-GNSS L1 code-phase fix across GPS L1 C/A, QZSS L1 C/A, SBAS L1, Galileo E1, BeiDou B1I, and GLONASS G1 from composite IQ. With `decode_nav=True`, the receiver operates completely standalone without external RINEX ephemeris by decoding broadcast navigation messages directly from IQ: GPS L1 C/A LNAV (50 bps), Galileo E1 I/NAV (250 sym/s, rate-1/2 FEC, 10-word reconstructor), BeiDou B1I D1 (50 bps, BCH (15,11,1) + deinterleaving + NH20 wipe-off), and SBAS L1 (RTCA DO-229 Type 9 GEO navigation message, 500 sym/s, rate-1/2 K=7 FEC, CRC-24Q). Geodetic ENU coordinates now accurately compute against the WGS-84 ellipsoid normal (resolving the 0.19° I11 az/el bias), and satellite clock evaluation incorporates week-crossover wrap protection (resolving I15).
-- **Two transmit slots** (`TX1`, `TX2`) maximum.
-- **Some endpoints have limited UI wiring** (`/api/receiver`, `/api/lnav`,
-  `/api/correlation`, `/api/preview_track`) — call them directly with
-  `curl` if a panel isn't exposed on your build.
-- The CDDIS RINEX mirror needs NASA Earthdata credentials; without them
-  only the BKG mirror is effective. SP3 products download from the free
-  anonymous BKG/IGN mirrors in `PRECISE_SP3_MIRRORS` (rapid tried before
-  final) on an explicit `download` request, or load by local path. Very
-  recent epochs may have no rapid product published yet. The bundled
-  `tests/fixtures/igs_sample.sp3` is a synthetic Kepler+bias file, so the
-  offline test-suite does not exercise real non-Keplerian orbit dynamics.
-
-### Optional models (all default-off, all deterministic)
-
-These are library modules with unit + consistency tests. Every sub-model
-defaults to `off`. When a request enables one it **always** shapes the
-`/api/preview` and truth observables (never the geometric range or the
-motion-derived Doppler); whether it also alters the generated **IQ** is a
-separate opt-in — see *Channel models in the IQ* below.
-
-| Module | Model | Notes / assumptions |
-|---|---|---|
-| `backend/models/atmosphere.py` | Klobuchar iono (L1), Saastamoinen tropo | Broadcast-grade. Saastamoinen uses a `1/sin(el)` mapping, good to a few cm above ~15° — not Niell/VMF1. |
-| `backend/models/receiver_clock.py` | Receiver clock offset: bias + drift + drift-rate polynomial, optional sawtooth | Distinct from satellite clock and propagation delay; adds a common `c·offset` to simultaneous pseudoranges and a common `−f_L1·drift` carrier offset. No RNG. |
-| `backend/models/multipath.py` | Specular: direct + N reflections (delay, amplitude<1, phase, Doppler) | `channel_taps()` for convolving clean IQ; `tracking_bias()` is a closed-form narrow-correlator DLL/Costas approximation, **not** a substitute for filtering the IQ. |
-| `backend/models/channel_models.py` | Glue: parses the three request dicts, applies them to the preview/truth observables, produces the UI summary | The three model modules stay standalone; this is the only place that binds them to a request. |
-| `backend/models/impairments.py` | RF impairment layer over complex IQ: CFO, sample-clock ppm, phase noise, I/Q imbalance, DC offset, AWGN (SNR or noise power), clipping, requantisation | All randomness from one seeded `default_rng`; `(config, seed, input) → output` is bit-for-bit reproducible. Wired into `generator.run` via `ScenarioRequest.impairments` (default `None`); the clean file is kept as `gpssim.clean.bin`. The native engine applies the same chain streamed per band file (`backend/synth/postproc.py`, independent noise per band, no clean copy). Reachable from the browser UI via the per-channel *RF impairments (advanced)* panel (collapsed and opt-in; an untouched panel leaves the `/api/generate` body unchanged). The panel has a **Preset** selector — *Bench cable test*, *Field test — typical*, *Field test — degraded/urban* — that fills every field with representative SDR-replay values and ticks the enable box; hand-editing any field reverts it to *Custom*. Presets are frontend-only starting points, not a calibrated device model. |
-| `backend/models/wls.py` | Elevation-weighted least-squares fix + GDOP/PDOP/HDOP/VDOP/TDOP + formal covariance | Standalone; the legacy unweighted `receiver.solve_position` is unchanged. |
-| `backend/models/error_budget.py` | Per-PRN 1-σ range error budget, RSS to a UERE | Nominal figures are **documentation-grade, not a calibration** of this simulator. |
-
-All four sub-models are reachable from the browser: the per-channel
-**Propagation & receiver models (advanced)** panel (collapsed, opt-in)
-feeds `atmosphere` / `receiver_clock` / `multipath` and a `models_to_iq`
-flag into `/api/preview` and `/api/generate`. An untouched panel adds
-nothing to either request. `/api/preview` returns a `channel_models`
-summary (per-epoch iono/tropo metres, receiver-clock offset, multipath
-bias) that the panel renders under the controls. A **Preset** selector —
-*Open sky*, *Urban canyon*, *Foliage / weak signal* — fills the model
-fields with a representative scenario (`apply to IQ` is left as set);
-hand-editing any field reverts it to *Custom*. Presets are frontend-only
-starting points, not a site-calibrated model.
-
-#### Channel models in the IQ
-
-By default the models are **truth-only** — the generated `gpssim.bin` is
-byte-identical to a run without them. Ticking *Also apply these models to
-the generated IQ* (`models_to_iq=true`) turns on:
-
-- **Ionosphere** — `atmosphere.ionosphere == "klobuchar"` keeps
-  gps-sdr-sim's own broadcast Klobuchar enabled (drops its `-i`
-  suppression flag), so the delay is in the IQ via the generator, not a
-  post-process.
-- **Receiver clock + multipath** — `generator._apply_channel` runs a
-  *quasi-static* post-process on the composite signal (evaluated once at
-  mid-scenario): a common receiver-clock time/carrier offset and a
-  specular-multipath FIR. It runs before the RF-impairment stage; the
-  pre-channel file is kept as `gpssim.prechannel.bin` and a report lands
-  in `meta.json`'s `provenance.channel_models`. A large clock drift or a
-  non-zero reflection Doppler is only approximated, and **tropospheric
-  delay is never injected into the IQ** — the report flags this.
-
-### Reproducibility
-
-`generator.run` writes a `provenance` block into `meta.json`: a
-`scenario_hash` over the physical inputs, the git revision, the
-`gps-sdr-sim` version string, SHA-256 of the RINEX and nav files, the
-random seed, and (for precise mode) the fit method and worst dense
-post-fit residual. It also always records an `iq_integrity` report over
-the first 2M samples of the output. Identical `(request, seed)` inputs
-with a given `gps-sdr-sim` build reproduce the same `gpssim.bin`; the
-impairment layer is separately bit-reproducible.
-
-### What is **not** claimed
-
-- Not "precise" in the geodetic sense: broadcast mode realigns rather
-  than propagates, and precise mode is orbit-accurate over a 4 h arc with
-  a few-ns clock.
-- Not a calibrated error model: the atmospheric, multipath and
-  receiver-clock models are physically shaped but not tuned to match any
-  reference receiver or real recording.
-- Not a full software receiver: acquisition + a single-epoch LS/WLS fix,
-  no tracking loops, no carrier-phase / RTK processing.
-- No real-SDR or hardware-in-the-loop guarantees from the test suite; the
-  `xfail` cases are the only hardware-touching tests and are not run by
-  default.
+- **Continuous Live Progression:** In live in-memory mode (`Start Now`), time advances linearly forward indefinitely ($t = k \times 1.0\text{ s}$). The session does not loop, rewind, or wrap. Ephemeris blocks are refreshed seamlessly every 15 minutes to keep orbit parameters valid for receivers.
+- **Standards Compliance:**
+  - **SBAS L1:** Implements RTCA DO-229 / ICAO Annex 10 standards: direct-form CRC-24Q, rate-1/2 FEC, 1-second preamble sync (0x53, 0x9A, 0xC6), MT 1/2/7/9/10/18/24/25/26 framing.
+  - **Galileo E1:** Implements Galileo OS SIS ICD Issue 2.0/2.1: time-reversed polynomial FEC (G1=0o117, G2=0o155 with inverted G2), BPSK symbol polarity (bit 0 $\to$ +1, bit 1 $\to$ −1), and structured I/NAV word mapping.
+  - **BeiDou B1I:** Implements BeiDou SIS ICD: D1 navigation framing, BCH (15,11,1) error correction, and NH20 secondary code modulation.
+- **Multi-GNSS Software Receiver Fix:** Built-in receiver performs code-phase pseudorange extraction, least-squares navigation positioning, and geodetic coordinate transformations on the WGS-84 ellipsoid normal.
+- **SDR Hardware Channels:** Up to two concurrent physical TX slots (`TX1`, `TX2`) supported on dual-channel SDR platforms.
 
 ---
 
