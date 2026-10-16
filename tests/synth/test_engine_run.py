@@ -91,3 +91,23 @@ def test_engine_run_in_memory_no_disk(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
     iq = inspector.raw_to_iq(raw)
     assert len(iq) == int(req.sample_rate * 1)
+
+
+def test_engine_arbitrary_constellations_without_gps(tmp_path, monkeypatch):
+    """GPS zorunlu olmadan yalnızca Galileo, yalnızca BeiDou veya GPS'siz çoklu takımyıldız
+    (Galileo+BeiDou) üretiminin sorunsuz çalıştığını doğrula."""
+    monkeypatch.setattr(config, "OUT_DIR", tmp_path)
+    rnx = str(pathlib.Path(__file__).parent.parent / "fixtures" / "brdc_mixed.rnx")
+    for sys_tuple in [("E",), ("C",), ("E", "C")]:
+        req = ScenarioRequest(
+            rinex_path=rnx, lat=41.0, lon=29.0, alt=100.0,
+            start=dt.datetime(2026, 9, 1, 12, 0, 0), duration_s=1,
+            sample_rate=6_000_000.0, sample_format="int16",
+            engine="native", systems=sys_tuple, in_memory=True,
+        )
+        res = engine.run(req)
+        assert isinstance(res, dict)
+        assert "gpssim.bin" in res
+        raw = res["gpssim.bin"]
+        assert len(raw) > 0
+

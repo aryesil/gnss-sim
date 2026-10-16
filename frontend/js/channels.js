@@ -202,7 +202,7 @@ window.addChannel = function () {
             <option value="gps-sdr-sim">gps-sdr-sim (GPS L1 C/A only)</option>
           </select></label>
           <fieldset class="sys-set"><legend>Constellations (native)</legend>
-            <label><input type="checkbox" id="${id}-sys-G" checked disabled> GPS</label>
+            <label><input type="checkbox" id="${id}-sys-G" checked> GPS</label>
             <label><input type="checkbox" id="${id}-sys-R"> GLONASS</label>
             <label><input type="checkbox" id="${id}-sys-E"> Galileo</label>
             <label><input type="checkbox" id="${id}-sys-C"> BeiDou</label>
@@ -459,13 +459,14 @@ function wireChannelActions(id) {
   // engine is selected -- gps-sdr-sim only ever emits GPS L1 C/A).
   function _updateEngineConstellationState() {
     const isNative = document.getElementById(`${id}-engine`).value === 'native';
-    ['R', 'E', 'C', 'J', 'S', 'I'].forEach(s => {
+    ['G', 'R', 'E', 'C', 'J', 'S', 'I'].forEach(s => {
       const box = document.getElementById(`${id}-sys-${s}`);
       box.disabled = !isNative;
-      // gps-sdr-sim is GPS-only: also clear the boxes so _engineBody() stops
-      // emitting `systems` and /api/generate no longer 422s. Switching back to
-      // native only re-enables them (no auto-check).
-      if (!isNative) box.checked = false;
+      // gps-sdr-sim sadece GPS destekler: ona geçildiğinde G işaretli tutulur, diğerleri temizlenir.
+      if (!isNative) {
+        if (s !== 'G') box.checked = false;
+        else box.checked = true;
+      }
     });
     ['L2', 'L5'].forEach(b => {
       const box = document.getElementById(`${id}-band-${b}`);
@@ -988,7 +989,8 @@ function wireChannelActions(id) {
     }
     const sys = ["G", "R", "E", "C", "J", "S", "I"].filter(
       s => document.getElementById(`${id}-sys-${s}`).checked);
-    if (sys.length > 1) out.systems = sys;
+    // Herhangi bir takımyıldız seçilmişse (GPS zorunlu değil; tekil Galileo, BeiDou vb. dahil) systems parametresi gönderilir.
+    if (sys.length > 0) out.systems = sys;
     const bandBoxes = ["L1", "L2", "L5"].filter(
       b => document.getElementById(`${id}-band-${b}`).checked);
     // ["L1"] alone is the implicit legacy default -- omit it so an untouched
