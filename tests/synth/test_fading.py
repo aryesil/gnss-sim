@@ -74,7 +74,7 @@ def _j0(x):
 # ---- plumbing ----------------------------------------------------------------
 
 def test_abi_version_matches_library():
-    assert _lib.load_lib().synth_abi_version() == _lib.ABI_VERSION == 29
+    assert _lib.load_lib().synth_abi_version() == _lib.ABI_VERSION == 30
 
 
 def test_chacha20_rfc8439_block_vector():

@@ -199,7 +199,6 @@ window.addChannel = function () {
           <p class="adv-head">Signal engine <span class="info" title="native (default) is the built-in C++ engine: every constellation and band, navigation messages and the per-satellite land-mobile-satellite channel model. gps-sdr-sim is the external generator (GPS L1 C/A only).">i</span></p>
           <label>Engine <select id="${id}-engine">
             <option value="native" selected>native (C++ engine, default)</option>
-            <option value="gps-sdr-sim">gps-sdr-sim (GPS L1 C/A only)</option>
           </select></label>
           <fieldset class="sys-set"><legend>Constellations (native)</legend>
             <label><input type="checkbox" id="${id}-sys-G" checked> GPS</label>
@@ -969,7 +968,7 @@ function wireChannelActions(id) {
     const quant = document.getElementById(`${id}-quant`).value;
     const fm = document.getElementById(`${id}-fade-model`).value;
     const out = {};
-    if (eng && eng !== 'gps-sdr-sim') out.engine = eng;
+    if (eng) out.engine = eng;
     if (fs) out.sample_rate = Number(fs);
     if (quant && quant !== 'int16') out.sample_format = quant;
     if (fm && fm !== 'off') {

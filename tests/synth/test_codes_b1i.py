@@ -91,5 +91,6 @@ def test_b1i_bad_prn_and_short_buffer():
 
 
 def test_abi_version_is_current():
-    assert _lib.load_lib().synth_abi_version() == 29
-    assert _lib.ABI_VERSION == 29
+    # ABI 30: in-memory destination buffer (BandSpec.out_mem) desteği
+    assert _lib.load_lib().synth_abi_version() == 30
+    assert _lib.ABI_VERSION == 30

@@ -21,7 +21,7 @@ def test_generate_rejects_bad_fading():
 
 
 def test_generate_rejects_int12_on_gps_sdr_sim_path():
-    for extra in ({}, {"engine": "gps-sdr-sim"}):
+    for extra in ({"engine": "gps-sdr-sim"},):
         r = client.post("/api/generate", json={
             "lat": 41.0, "lon": 29.0, "alt": 100.0,
             "start_utc": "2024-01-01T00:00:00", "duration_s": 1,

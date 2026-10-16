@@ -97,7 +97,7 @@ def _validate_native_request(body: dict) -> tuple[str, list[str], list[str] | No
     or non-L1 bands, and bad fading/sample_format combinations all reject
     with a plain 422 before any ephemeris resolution or TX slot is touched.
     Returns (engine, systems, bands_req)."""
-    engine = body.get("engine", "gps-sdr-sim")
+    engine = body.get("engine", "native")
     if engine not in ("gps-sdr-sim", "native"):
         raise HTTPException(422, f"engine: unknown {engine!r}")
     if body.get("fading") is not None:
@@ -943,9 +943,6 @@ def generate(body: dict):
         raise HTTPException(422, f"channel model: {e}")
     if scenario.estimate_bytes(req) > download_free_bytes(config.OUT_DIR):
         raise HTTPException(507, "estimated IQ size exceeds free disk space")
-    if req.engine == "gps-sdr-sim" and not pathlib.Path(config.GPS_SDR_SIM_BIN).exists():
-        if getattr(generator, "run", None) is getattr(generator, "_original_run", None):
-            raise HTTPException(503, f"gps-sdr-sim binary missing: {config.GPS_SDR_SIM_BIN}")
 
     def events():
         precise_multi = (isinstance(req.nav_override, dict)

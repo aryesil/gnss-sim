@@ -62,9 +62,9 @@ class ScenarioRequest:
     receiver_clock: dict | None = None
     multipath: dict | None = None
     models_to_iq: bool = False
-    # Signal-generation engine. "gps-sdr-sim" (default, external binary) or
-    # "native" (backend.synth, opt-in). Unknown values raise in signal_engine.
-    engine: str = "gps-sdr-sim"
+    # Sinyal üretim motoru. "native" (C++ motoru, varsayılan).
+    # gps-sdr-sim emekliye ayrılmıştır; tüm üretim native motor tarafından yapılır.
+    engine: str = "native"
     # Deterministic per-SV fading, parsed by backend.synth.fading.FadingConfig.
     # None -> no fading (native engine emits static per-SV gain).
     fading: dict | None = None
@@ -118,7 +118,7 @@ def estimate_bytes(req: ScenarioRequest) -> int:
     """
     bps = _bytes_per_sample(req.sample_format)
     fs1 = float(req.sample_rate)
-    if getattr(req, "engine", "gps-sdr-sim") == "native":
+    if getattr(req, "engine", "native") == "native":
         # the native engine raises a too-low L1 rate (bands._band_fs)
         l1 = sorted({_bandsmod._signal_key(sig)
                      for sysc in (req.systems or ("G",))
