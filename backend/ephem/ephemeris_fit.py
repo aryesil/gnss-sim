@@ -348,9 +348,12 @@ def fit_satellite(state_fn, epoch: GPSTime, *, prn, source: str,
     af0, af1, af2, clk_resid = _fit_clock(sow, clk - rel, toe)
 
     eph = _eph_from_theta(theta, toe, epoch.week, sys)
+    # Galileo'da IODnav sabit 0 kalırsa toe değişse de alıcı eski efemerisi
+    # tutabilir; toe'dan türet (align_epochs ile aynı kural). Diğer sistemler aynı.
+    iode_val = float(int(toe // 600) & 0x3FF) if sys == "E" else 0.0
     eph.update({
         "af0": af0, "af1": af1, "af2": af2,
-        "tgd": 0.0, "iode": 0.0, "iodc": 0.0, "health": 0.0,
+        "tgd": 0.0, "iode": iode_val, "iodc": 0.0, "health": 0.0,
         "codes_l2": 0.0,
     })
 

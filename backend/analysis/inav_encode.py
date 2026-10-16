@@ -125,7 +125,7 @@ def _iodnav(eph: dict) -> int:
     """Galileo IODnav türetimi (10 bit, 0-1023):
     1. 'iodnav' alanı varsa öncelikli olarak kullan.
     2. 'iode' alanı varsa (bazı RINEX ayrıştırıcıları buraya yazar) kullan.
-    3. İkisi de yoksa toe // 600 mod 1024 ile deterministik türet (Galileo OS SIS ICD Tablo 33).
+    3. İkisi de yoksa toe // 600 mod 1024 ile deterministik türet (proje içi deterministik türetme kuralı; standart kuralı değil).
     """
     for key in ("iodnav", "iode"):
         val = eph.get(key)
