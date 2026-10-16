@@ -263,6 +263,7 @@ def _pick_epoch(sub, noon_gps: float, sysc: str):
     """
     if sysc in _KEPLER_SYS:
         best_i, best_d = 0, None
+        best_inav_i, best_inav_d = None, None
         for i in range(int(sub.time.size)):
             r = sub.isel(time=i)
             var, wk_off, t_off = _WEEK_VAR.get(sysc, ("GPSWeek", 0, 0.0))
@@ -271,6 +272,18 @@ def _pick_epoch(sub, noon_gps: float, sysc: str):
             d = abs(wk * _WEEK_SECONDS + toe - noon_gps)
             if best_d is None or d < best_d:
                 best_i, best_d = i, d
+            if sysc == "E" and "DataSrc" in r:
+                try:
+                    ds = int(float(r["DataSrc"].values))
+                    # RINEX 3.04 Tablo A8: bit 0 (1) = I/NAV E1-B, bit 2 (4) = I/NAV E5b-I.
+                    # E1 civil bandı I/NAV kullandığından I/NAV kaydı varsa önceliklendir.
+                    if ds & 0x05:
+                        if best_inav_d is None or d < best_inav_d:
+                            best_inav_i, best_inav_d = i, d
+                except (TypeError, ValueError):
+                    pass
+        if best_inav_i is not None:
+            return sub.isel(time=best_inav_i)
         return sub.isel(time=best_i)
     times = [_gps_seconds(_to_datetime(t)) for t in sub.time.values]
     best_i = min(range(len(times)), key=lambda i: abs(times[i] - noon_gps))

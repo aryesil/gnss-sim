@@ -49,3 +49,53 @@ def test_inav_page_timing_and_tow_alignment(galileo_eph):
             tow_checked += 1
 
     assert tow_checked >= 10, f"En az 10 adet TOW içeren sayfa test edilmeli, kontrol edilen: {tow_checked}"
+
+
+def test_inav_end_to_end_iq_timing_and_demod(tmp_path):
+    """C++ Native motor tarafından üretilen gerçek RF IQ dosyasını (gpssim.bin)
+    demod_symbols_e1b ile demodüle edip I/NAV sayfalarını ve TOW zamanlamasını doğrula.
+    Böylece mikser, kod fazı, tx_chips_offset ve geometrik gecikme (rho/c) zincirinin tamamı sınanır.
+    """
+    import datetime as dt
+    import json
+    import numpy as np
+    from backend.scenario import ScenarioRequest
+    from backend.synth import engine
+
+    fs = 6_000_000.0
+    req = ScenarioRequest(
+        rinex_path="tests/fixtures/brdc_mixed.rnx",
+        lat=41.0, lon=29.0, alt=100.0,
+        start=dt.datetime(2026, 9, 1, 12, 0, 0),
+        duration_s=8,
+        sample_rate=fs,
+        sample_format="int16",
+        engine="native",
+        systems=("E",),
+        nav_message=True,
+        outdir=tmp_path,
+    )
+    out = engine.run(req)
+    raw = np.fromfile(out / "gpssim.bin", dtype=np.int16).astype(np.float32)
+    iq = raw[0::2] + 1j * raw[1::2]
+    meta = json.loads((out / "meta.json").read_text())
+    sv = meta["provenance"]["svs"][0]
+    prn = sv["prn"]
+
+    # RF IQ'dan E1-B BOC(1,1) sembollerini demodüle et
+    syms = inav_decode.demod_symbols_e1b(iq, fs, prn)
+    assert len(syms) >= 1000, f"En az 1000 sembol demodüle edilmeli, bulunan: {len(syms)}"
+
+    # Demodüle sembollerden I/NAV sayfalarını çöz
+    msgs = inav_decode.decode_messages(syms)
+    assert len(msgs) >= 2, f"En az 2 tam sayfa çözülmeli, bulunan: {len(msgs)}"
+
+    # Çözülen sayfalar arası 500 sembol (2.0 saniye) mesafeyi ve TOW tutarlılığını doğrula
+    for i in range(len(msgs) - 1):
+        p1, p2 = msgs[i], msgs[i + 1]
+        assert p2["sym_idx"] - p1["sym_idx"] == 500, "Sayfalar arası mesafe tam 500 sembol (2 s) olmalı"
+        tow1 = p1["fields"].get("tow")
+        tow2 = p2["fields"].get("tow")
+        if tow1 is not None and tow2 is not None:
+            assert tow2 - tow1 == 2.0, "İki ardışık sayfa TOW farkı 2 saniye olmalı"
+
