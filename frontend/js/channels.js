@@ -1200,7 +1200,8 @@ function wireChannelActions(id) {
     const body = {
       rinex_path: document.getElementById(`${id}-rinex-path`).value.trim() || 'AUTO',
       lat: ll.lat, lon: ll.lng, alt: 100,
-      start_utc: document.getElementById(`${id}-start-now`).checked
+      // start-now kutusu işaretliyse veya start-utc boş bırakılmışsa gerçek geçerli zamandan ('now') başlat
+      start_utc: (document.getElementById(`${id}-start-now`).checked || !document.getElementById(`${id}-start-utc`).value)
         ? 'now' : document.getElementById(`${id}-start-utc`).value + ':00',
       duration_s: Number(document.getElementById(`${id}-duration`).value),
       sample_rate: _rateValue(),
