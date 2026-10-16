@@ -103,7 +103,9 @@ def toe_grid_for(engine: str | None) -> float:
 
 # Systems whose RINEX toe/week are on the GPS time scale (GPSWeek field),
 # so a record can be used with its REAL broadcast epoch.
-_REAL_EPOCH_SYS = ("G", "J")
+# Galileo: GALWeek GPS haftasına hizalı, Toe saniyesi GST=GPST. Gerçek kayıt gerçek toe ve
+# IODnav ile birlikte kullanılırsa simüle gökyüzü alıcının bildiğiyle uyuşur.
+_REAL_EPOCH_SYS = ("G", "J", "E")
 # A real record stays in use up to 4 h from its toe: past the nominal
 # +/-2 h fit it drifts only tens of metres, while relabelling puts the
 # satellite on a fictitious orbit (a receiver with real assistance data then
@@ -204,6 +206,14 @@ def align_epochs(eph_by_prn: dict[int, dict], week: int, sow: float,
             e2["toc"] = k
             e2["toe"] = k
             e2["gps_week"] = week
+            if e2.get("system") == "E":
+                # Galileo yeniden etiketlendiğinde IODnav değeri sahte yörüngenin
+                # toe'sinden türetilmeli, aksi halde gerçek IODnav ile alıcı önbelleğindeki
+                # gerçek yörünge eşleşip simüle pseudorange reddedilir.
+                new_iod = int(k // 600) & 0x3FF
+                e2["iode"] = new_iod
+                if "iodnav" in e2:
+                    e2["iodnav"] = new_iod
         out[prn] = e2
     return out
 
