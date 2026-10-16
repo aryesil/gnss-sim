@@ -22,11 +22,7 @@ case "$SDR_KIND" in
 esac
 echo "Building native libraries for: $SDR_KIND"
 
-if [ ! -x gps-sdr-sim/gps-sdr-sim ]; then
-  [ -d gps-sdr-sim ] || git clone https://github.com/osqzss/gps-sdr-sim
-  gcc -O3 gps-sdr-sim/gpssim.c -lm -o gps-sdr-sim/gps-sdr-sim -DUSER_MOTION_SIZE=4000
-fi
-echo "gps-sdr-sim built: $(gps-sdr-sim/gps-sdr-sim 2>&1 | head -1 || true)"
+# gps-sdr-sim emekliye ayrıldı; tüm sinyal üretimi C++ native motor ile yapılır.
 
 VENV=.venv
 python3 -m venv "$VENV"

@@ -114,7 +114,7 @@ window.addChannel = function () {
         <label title="Live Start only: run on the real current GPS time (needed by phones / A-GPS receivers)"><input type="checkbox" id="${id}-start-now"> Live: now</label>
         <label>Duration s <input type="number" id="${id}-duration" value="300"></label>
         <label title="Auto-stop live transmission when duration expires"><input type="checkbox" id="${id}-duration-autostop" checked> Auto-stop after duration</label>
-        <label>Sample rate <select id="${id}-rate" title="auto: the lowest rate that holds every selected system (native engine); gps-sdr-sim uses 2.6 MSPS">
+        <label>Sample rate <select id="${id}-rate" title="auto: the lowest rate that holds every selected system">
           <option value="auto" selected>auto</option><option>2600000</option><option>4000000</option><option>5000000</option><option>8000000</option><option>10000000</option><option>15000000</option>
         </select></label>
         <label>Format <select id="${id}-fmt"><option>int16</option><option>int8</option></select></label>
@@ -141,7 +141,7 @@ window.addChannel = function () {
           <div id="${id}-sp3-status" class="hint"></div>
         </section>
         <section class="adv-tab" data-adv="imp" hidden>
-          <p class="adv-head">RF impairments (advanced) <span class="info" title="Deterministic, seeded. Post-processes the generated IQ. gps-sdr-sim keeps a clean copy as gpssim.clean.bin; the native engine impairs every band file in place (the same request without impairments regenerates the clean file) with independent noise per band. All-zero fields = no-op.">i</span></p>
+          <p class="adv-head">RF impairments (advanced) <span class="info" title="Deterministic, seeded. Post-processes the generated IQ. Impairs every band file in place (the same request without impairments regenerates the clean file) with independent noise per band. All-zero fields = no-op.">i</span></p>
           <label>Preset <select id="${id}-imp-preset">
             <option value="manual">Custom (enter values below)</option>
             <option value="bench">Bench cable test (near-ideal)</option>
@@ -162,7 +162,7 @@ window.addChannel = function () {
           <label>Quantizer bits <input id="${id}-imp-bits" type="number" value="0" min="0" max="16"></label>
         </section>
         <section class="adv-tab" data-adv="mdl" hidden>
-          <p class="adv-head">Propagation &amp; receiver models (advanced) <span class="info" title="Deterministic, RNG-free. These always shape the Preview / truth observables. They alter the generated IQ only when 'apply to IQ' is ticked. gps-sdr-sim: ionosphere rides its own broadcast Klobuchar, a quasi-static receiver-clock + multipath channel is convolved onto the composite signal (clean copy kept as gpssim.prechannel.bin), troposphere stays truth-only. native: ionosphere and troposphere are always in the IQ; the receiver clock is applied exactly per satellite and band (offset, drift, sawtooth), and multipath is convolved per band file with each reflection's Doppler rotating per sample. All 'off' = no change.">i</span></p>
+          <p class="adv-head">Propagation &amp; receiver models (advanced) <span class="info" title="Deterministic, RNG-free. These always shape the Preview / truth observables. They alter the generated IQ only when 'apply to IQ' is ticked. Ionosphere and troposphere are always in the IQ; the receiver clock is applied exactly per satellite and band (offset, drift, sawtooth), and multipath is convolved per band file with each reflection's Doppler rotating per sample. All 'off' = no change.">i</span></p>
           <label>Preset <select id="${id}-mdl-preset">
             <option value="manual">Custom (set fields below)</option>
             <option value="open-sky">Open sky — mid-latitude, clean</option>
@@ -196,7 +196,7 @@ window.addChannel = function () {
           <div id="${id}-mdl-summary" class="hint"></div>
         </section>
         <section class="adv-tab" data-adv="eng" hidden>
-          <p class="adv-head">Signal engine <span class="info" title="native (default) is the built-in C++ engine: every constellation and band, navigation messages and the per-satellite land-mobile-satellite channel model. gps-sdr-sim is the external generator (GPS L1 C/A only).">i</span></p>
+          <p class="adv-head">Signal engine <span class="info" title="Built-in C++ engine: every constellation and band, navigation messages and the per-satellite land-mobile-satellite channel model.">i</span></p>
           <label>Engine <select id="${id}-engine">
             <option value="native" selected>native (C++ engine, default)</option>
           </select></label>
@@ -453,15 +453,12 @@ function wireChannelActions(id) {
   });
   _updateSizeEstimate();
 
-  // Engine select: toggle disabled state on non-G constellation checkboxes
-  // and on the L2/L5 band checkboxes (both are only available when native
-  // engine is selected -- gps-sdr-sim only ever emits GPS L1 C/A).
+  // Engine select: toggle disabled state on constellation checkboxes and L2/L5 bands.
   function _updateEngineConstellationState() {
     const isNative = document.getElementById(`${id}-engine`).value === 'native';
     ['G', 'R', 'E', 'C', 'J', 'S', 'I'].forEach(s => {
       const box = document.getElementById(`${id}-sys-${s}`);
       box.disabled = !isNative;
-      // gps-sdr-sim sadece GPS destekler: ona geçildiğinde G işaretli tutulur, diğerleri temizlenir.
       if (!isNative) {
         if (s !== 'G') box.checked = false;
         else box.checked = true;
@@ -495,10 +492,7 @@ function wireChannelActions(id) {
   };
 
   // Card header: reflects the engine/system/band boxes actually checked
-  // *right now*, instead of a title frozen at "GPS L1 C/A" from card
-  // creation regardless of what this channel is configured to emit.
-  // gps-sdr-sim is a fixed GPS L1 C/A generator, so its label never varies;
-  // native's label lists every checked constellation and every checked
+  // *right now*, listing every checked constellation and every checked
   // band, so two channels with different selections read differently.
   const _SYS_LABEL = { G: 'GPS', R: 'GLONASS', E: 'Galileo', C: 'BeiDou', J: 'QZSS', S: 'SBAS', I: 'NavIC' };
   const _chanNum = id.slice(2);
@@ -524,8 +518,7 @@ function wireChannelActions(id) {
   // choice like GLONASS's G1 (1602 MHz, not L1's 1575.42) still lands on
   // the real centre frequency instead of a client-side guess. "Custom"
   // hands the field back to the operator; switching back to "Auto"
-  // recomputes immediately. gps-sdr-sim is a fixed GPS L1 C/A generator,
-  // so it always resolves to L1 without a round trip.
+  // recomputes immediately.
   const _loInput = document.getElementById(`${id}-lo`);
   const _loModeSel = document.getElementById(`${id}-lo-mode`);
   let _loReqToken = 0;
@@ -960,8 +953,7 @@ function wireChannelActions(id) {
   }
 
   // Fold the opt-in "Signal engine" panel into the /api/generate body.
-  // Every control sits at its default (engine gps-sdr-sim, quant int16,
-  // fading off, blank fs) -> returns null -> the request body is unchanged.
+  // Defaults: engine native, quant int16, fading off, blank fs.
   function _engineBody() {
     const eng = document.getElementById(`${id}-engine`).value;
     const fs = document.getElementById(`${id}-fs`).value;
