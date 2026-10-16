@@ -8,7 +8,10 @@ import math
 import pathlib
 import time
 
-import georinex as gr
+# georinex (xarray+pandas) ~0.7 s import eder; yalnızca ayrıştırma gerektiğinde
+# (parse cache ıskalandığında) yüklenir. Canlı oturumun spawn edilen işçi süreci
+# önceden doldurulmuş cache ile hiç ayrıştırmadığından ilk segment gecikmesi
+# bu kadar kısalır.
 import numpy as np
 import requests
 
@@ -454,6 +457,7 @@ def _parse_rinex_multi(path: str | pathlib.Path, systems=("G",),
     mixed BRDC files often omit SBAS ('S') and are sparse in QZSS ('J').
     """
     systems = tuple(dict.fromkeys(systems))          # dedupe, keep order
+    import georinex as gr
     nav = gr.load(_georinex_source(path), use=list(systems))
     # File's calendar day -> that day's noon UTC, as continuous GPS seconds.
     mid_day = _to_datetime(nav.time.values[len(nav.time) // 2])

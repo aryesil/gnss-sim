@@ -18,7 +18,6 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass, field
 
-import georinex as gr
 import numpy as np
 
 from backend import config
@@ -96,6 +95,7 @@ import math
 
 def parse_rinex_records(path) -> dict[int, list[RecordRef]]:
     """Every GPS navigation record in ``path``, grouped by PRN, unsorted."""
+    import georinex as gr   # geç yükleme: bkz. ephemeris.py (işçi süreç başlangıç süresi)
     nav = gr.load(ephemeris._georinex_source(path), use="G")
     out: dict[int, list[RecordRef]] = {}
     for sv in nav.sv.values:
