@@ -122,16 +122,27 @@ def _dac_full_scale(kind: str) -> float:
 
 def _rms(chunk: np.ndarray) -> float:
     c = np.asarray(chunk)
-    return float(np.sqrt(np.mean(c.real.astype(np.float64) ** 2
-                                 + c.imag.astype(np.float64) ** 2))) if c.size else 0.0
+    if not c.size:
+        return 0.0
+    re = c.real
+    im = c.imag
+    mean_sq = float(np.mean(re * re + im * im, dtype=np.float64))
+    return float(np.sqrt(mean_sq))
 
 
 def _clip_iq(chunk: np.ndarray, lim: float) -> tuple[np.ndarray, int]:
+    if not chunk.size:
+        return chunk, 0
     re = np.real(chunk)
     im = np.imag(chunk)
-    n = int(np.count_nonzero((np.abs(re) > lim) | (np.abs(im) > lim)))
+    if (float(np.max(re)) <= lim and float(np.min(re)) >= -lim
+            and float(np.max(im)) <= lim and float(np.min(im)) >= -lim):
+        return chunk, 0
+    over = (np.abs(re) > lim) | (np.abs(im) > lim)
+    n = int(np.count_nonzero(over))
     if n:
-        chunk = np.clip(re, -lim, lim) + 1j * np.clip(im, -lim, lim)
+        chunk = (np.clip(re, -lim, lim) + 1j * np.clip(im, -lim, lim)).astype(
+            chunk.dtype, copy=False)
     return chunk, n
 
 
@@ -146,7 +157,13 @@ def _iter_chunks(path: str, fmt: str, chunk_samples: int):
                 return
             arr = np.frombuffer(raw, dtype=dtype)
             arr = arr[: len(arr) - (len(arr) % 2)]
-            yield (arr[0::2].astype(np.int16) + 1j * arr[1::2].astype(np.int16))
+            # Tek geçişte complex64: eski ifade int16 -> complex128 ara dizileri
+            # üretiyordu (16 B/örnek, 3 geçiş). int16 değerler float32'de tam
+            # temsil edilir; backend'ler zaten complex64'e indirgiyor.
+            out = np.empty(len(arr) // 2, dtype=np.complex64)
+            out.real = arr[0::2]
+            out.imag = arr[1::2]
+            yield out
 
 
 def stream(params: TxParams, dry_run: bool = False, progress_cb=None,

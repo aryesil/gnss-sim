@@ -66,11 +66,16 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   };
 
+  function _escHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
   document.getElementById('tb-open').onclick = async () => {
     const r = await fetch('/api/trajectory/list');
     const d = await r.json();
     const sel = document.getElementById('tb-open-list');
-    sel.innerHTML = d.names.map(n => `<option>${n}</option>`).join('');
+    sel.innerHTML = '<option value="">-- select --</option>' +
+      (d.names || []).map(n => `<option value="${_escHtml(n)}">${_escHtml(n)}</option>`).join('');
   };
 
   document.getElementById('tb-open-list').onchange = async (ev) => {
@@ -78,14 +83,30 @@ window.addEventListener('DOMContentLoaded', () => {
     if (!name) return;
     const r = await fetch(`/api/trajectory/load?name=${encodeURIComponent(name)}`);
     const d = await r.json();
-    _tbWaypoints = d.waypoints;
+    // Hata yanıtında (404 vb.) d.waypoints yoktur; undefined atanırsa tablo
+    // çizimi (.map) patlar. Dizi biçimli [lat,lon,alt] kayıtlar da nesneye
+    // çevrilir, çünkü tablo w.lat/w.lon alanlarını okur.
+    if (!r.ok || !Array.isArray(d.waypoints)) {
+      if (window.logLine) logLine('trajectory load failed: ' + (d.detail || JSON.stringify(d)), 'error');
+      return;
+    }
+    _tbWaypoints = d.waypoints.map(w => Array.isArray(w)
+      ? { lat: w[0], lon: w[1], alt: w[2], speed: w[3] ?? 5.0, accel: w[4] ?? 1.0 }
+      : w);
     _tbRedrawTable(); _tbRedrawMap();
   };
 
   document.getElementById('tb-apply').onclick = () => {
-    const firstCardId = document.querySelector('.channel-card')?.id;
-    if (!firstCardId) return alert('add a channel first');
-    channelState(firstCardId).route = _tbWaypoints.map(w => [w.lat, w.lon, w.alt]);
-    alert(`Applied ${_tbWaypoints.length} waypoints to ${firstCardId}`);
+    const activeCards = Array.from(document.querySelectorAll('.channel-card.active, .channel-card.selected'));
+    const targetCards = activeCards.length > 0
+      ? activeCards
+      : Array.from(document.querySelectorAll('.channel-card'));
+    if (!targetCards.length) return alert('add a channel first');
+    const route = _tbWaypoints.map(w => Array.isArray(w) ? [w[0], w[1], w[2]] : [w.lat, w.lon, w.alt]);
+    targetCards.forEach(card => {
+      const st = typeof channelState === 'function' ? channelState(card.id) : null;
+      if (st) st.route = route.map(pt => [pt[0], pt[1], pt[2]]);
+    });
+    alert(`Applied ${_tbWaypoints.length} waypoints to ${targetCards.map(c => c.id).join(', ')}`);
   };
 });

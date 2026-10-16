@@ -78,12 +78,11 @@ def acquire(iq, sample_rate, prn, doppler_range=(-6000, 6000),
     best = (-1.0, 0.0, 0, 0)
     acc_noise = []
     dopp_peaks = []
+    blocks = seg.reshape(noncoherent, ncoh)
     for di, fd in enumerate(dopps):
-        acc = np.zeros(ncoh)
-        for k in range(noncoherent):
-            blk = seg[k * ncoh:(k + 1) * ncoh]
-            blk = blk * np.exp(-1j * 2 * np.pi * fd * np.arange(k * ncoh, (k + 1) * ncoh) / sample_rate)
-            acc += np.abs(np.fft.ifft(np.fft.fft(blk) * LOC)) ** 2
+        ph = np.exp(-1j * 2 * np.pi * fd * np.arange(ncoh) / sample_rate)
+        blks = blocks * ph
+        acc = np.sum(np.abs(np.fft.ifft(np.fft.fft(blks) * LOC)) ** 2, axis=0)
         acc_noise.append(acc.mean())
         pk = acc.max()
         dopp_peaks.append(np.sqrt(pk))

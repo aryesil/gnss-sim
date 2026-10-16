@@ -49,14 +49,14 @@ def crc24q(bits: Sequence[int] | np.ndarray) -> list[int]:
     while idx + 8 <= n:
         chunk = bits[idx : idx + 8]
         byte = (
-            (int(chunk[0]) << 7)
-            | (int(chunk[1]) << 6)
-            | (int(chunk[2]) << 5)
-            | (int(chunk[3]) << 4)
-            | (int(chunk[4]) << 3)
-            | (int(chunk[5]) << 2)
-            | (int(chunk[6]) << 1)
-            | int(chunk[7])
+            ((int(chunk[0]) & 1) << 7)
+            | ((int(chunk[1]) & 1) << 6)
+            | ((int(chunk[2]) & 1) << 5)
+            | ((int(chunk[3]) & 1) << 4)
+            | ((int(chunk[4]) & 1) << 3)
+            | ((int(chunk[5]) & 1) << 2)
+            | ((int(chunk[6]) & 1) << 1)
+            | (int(chunk[7]) & 1)
         )
         top = (reg >> 16) ^ byte
         reg = ((reg << 8) & 0xFFFFFF) ^ _CRC24Q_TABLE[top]

@@ -225,7 +225,7 @@ def _almanac_words(alm: dict | None, sv_id: int) -> list[list[int]]:
 
     e = twos(g("e"), 2 ** -21, 16)
     toa = int(round(g("toa") / 4096)) & 0xFF
-    di = twos(g("i0", 0.0) / _math.pi, 2 ** -19, 16) if a else 0
+    di = twos(g("i0", 0.0) / _math.pi - 0.30, 2 ** -19, 16) if a else 0
     odot = twos(g("omega_dot") / _math.pi, 2 ** -38, 16) if a else 0
     health = int(g("health", 0)) & 0xFF
     sqrta = int(round(g("sqrtA") / 2 ** -11)) & 0xFFFFFF

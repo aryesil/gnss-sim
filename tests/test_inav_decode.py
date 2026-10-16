@@ -12,6 +12,13 @@ from backend.ephem import ephemeris
 _WEEK, _SOW = 2325, 561600.0
 
 
+def _inav_af0(erec):
+    """I/NAV af0 is E1-E5b referenced. The fixture record is F/NAV (E5a)
+    referenced, so the encoder shifts af0 by BGD(E1,E5a)-BGD(E1,E5b)."""
+    from backend import geometry
+    return erec["af0"] + geometry.galileo_clock_shift_s(erec, "E5B")
+
+
 @pytest.fixture(scope="module")
 def erec():
     e = ephemeris.parse_rinex_multi("tests/fixtures/brdc_mixed.rnx", ("E",),
@@ -129,7 +136,7 @@ def test_decode_word_types(erec):
             assert fields["sqrtA"] == pytest.approx(erec["sqrtA"], abs=1e-3)
         elif wtype == 4:
             assert fields["prn"] == erec["prn"]
-            assert fields["af0"] == pytest.approx(erec["af0"], abs=1e-9)
+            assert fields["af0"] == pytest.approx(_inav_af0(erec), abs=1e-9)
 
 
 def test_decode_messages_from_stream(erec):
@@ -188,7 +195,7 @@ def test_reconstruct_ephemeris(erec):
     assert rec["crs"] == pytest.approx(erec["crs"], abs=1.0)
     assert rec["cic"] == pytest.approx(erec["cic"], abs=1e-7)
     assert rec["cis"] == pytest.approx(erec["cis"], abs=1e-7)
-    assert rec["af0"] == pytest.approx(erec["af0"], abs=1e-9)
+    assert rec["af0"] == pytest.approx(_inav_af0(erec), abs=1e-9)
     assert rec["af1"] == pytest.approx(erec["af1"], abs=1e-12)
     assert rec["af2"] == pytest.approx(erec["af2"], abs=1e-15)
     assert rec["toe"] == pytest.approx(erec["toe"], abs=60.0)

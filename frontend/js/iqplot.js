@@ -2,12 +2,45 @@
 let _lastWaveform = {};   // canvasId -> {i, q} -- for hover readout
 let _lastSpectrum = {};   // canvasId -> {freqs, db} -- for hover readout
 
+function _maxAbs(i, q) {
+  let m = 1;
+  if (i) {
+    for (let k = 0; k < i.length; k++) {
+      const v = Math.abs(i[k]);
+      if (v > m) m = v;
+    }
+  }
+  if (q) {
+    for (let k = 0; k < q.length; k++) {
+      const v = Math.abs(q[k]);
+      if (v > m) m = v;
+    }
+  }
+  return m;
+}
+
+function _arrayMin(arr) {
+  let m = Infinity;
+  for (let k = 0; k < arr.length; k++) {
+    if (arr[k] < m) m = arr[k];
+  }
+  return m;
+}
+
+function _arrayMax(arr) {
+  let m = -Infinity;
+  for (let k = 0; k < arr.length; k++) {
+    if (arr[k] > m) m = arr[k];
+  }
+  return m;
+}
+
 window.drawWaveform = function (canvasId, i, q) {
   _lastWaveform[canvasId] = { i, q };
   const { g, W, H } = fitCanvas(canvasId);
   g.clearRect(0, 0, W, H);
   const n = i.length, mid = H / 2;
-  const maxAbs = Math.max(1, ...i.map(Math.abs), ...q.map(Math.abs));
+  const maxAbs = _maxAbs(i, q);
   const scale = (H / 2 - 4) / maxAbs;
   const plot = (arr, color) => {
     g.strokeStyle = color; g.lineWidth = 1; g.beginPath();
@@ -36,7 +69,7 @@ window.drawConstellation = function (canvasId, i, q) {
   const { g, W, H } = fitCanvas(canvasId);
   g.clearRect(0, 0, W, H);
   const cx = W / 2, cy = H / 2;
-  const maxAbs = Math.max(1, ...i.map(Math.abs), ...q.map(Math.abs));
+  const maxAbs = _maxAbs(i, q);
   const scale = (Math.min(cx, cy) - 4) / maxAbs;
   g.fillStyle = 'rgba(0,80,200,0.35)';
   for (let k = 0; k < i.length; k++) {
@@ -142,7 +175,7 @@ window.drawCorrelationCurve = function (canvasId, chips, amp) {
   const { g, W, H } = fitCanvas(canvasId);
   g.clearRect(0, 0, W, H);
   if (!amp.length) return;
-  const hi = Math.max(...amp);
+  const hi = _arrayMax(amp);
   g.strokeStyle = '#a06'; g.lineWidth = 1; g.beginPath();
   amp.forEach((v, k) => {
     const x = (chips[k] / 1023) * W, y = H - (v / hi) * (H - 4);
@@ -152,7 +185,7 @@ window.drawCorrelationCurve = function (canvasId, chips, amp) {
 };
 
 window.loadCorrelationCurve = async function (canvasId, readoutId, outdir, prn) {
-  const r = await fetch(`/api/correlation?outdir=${outdir}&prn=${prn}`);
+  const r = await fetch(`/api/correlation?outdir=${encodeURIComponent(outdir)}&prn=${prn}`);
   const out = document.getElementById(readoutId);
   if (!r.ok) { out.textContent = 'correlation error ' + r.status; return; }
   const d = await r.json();
@@ -166,7 +199,7 @@ window.loadCorrelationCurve = async function (canvasId, readoutId, outdir, prn) 
 // correlation. Fall back to the per-SV planned power (gain_db) from
 // meta.json provenance.svs, one bar per satellite across every system,
 // coloured by constellation.
-const _BAR_SYS_COLOR = { G:'#2a6', R:'#c30', E:'#093', C:'#c60', J:'#606', S:'#888' };
+const _BAR_SYS_COLOR = { G:'#2a6', R:'#c30', E:'#093', C:'#c60', J:'#606', S:'#888', I:'#a3e635' };
 
 // fadingGainDb(sv, t_s) lives in fading.js (loaded before this file).
 
@@ -209,7 +242,7 @@ window.drawCorrelationBars = function (canvasId, rows, svs, t_s) {
   // tiny and would be invisible on a fixed axis.
   let lo, hi;
   if (isGain) { lo = -36; hi = 6; }
-  else { hi = Math.max(...vals) + 1; lo = Math.min(Math.min(...vals) - 2, hi - 6); }
+  else { hi = _arrayMax(vals) + 1; lo = Math.min(_arrayMin(vals) - 2, hi - 6); }
   const span = Math.max(1e-6, hi - lo);
   const yOf = v => H - 10 - ((Math.max(lo, Math.min(hi, v)) - lo) / span) * (H - 22);
   if (isGain) {
@@ -249,7 +282,7 @@ window.pushSpectrogramColumn = function (canvasId, db) {
   if (!c) return;
   const g = c.getContext('2d');
   g.drawImage(c, 1, 0, c.width - 1, c.height, 0, 0, c.width - 1, c.height);
-  const lo = Math.min(...db), hi = Math.max(...db);
+  const lo = _arrayMin(db), hi = _arrayMax(db);
   const span = Math.max(1e-6, hi - lo);
   const h = c.height, n = db.length;
   for (let y = 0; y < h; y++) {
@@ -272,7 +305,7 @@ window.pushCn0Sample = function (canvasId, db) {
   while (hist.length > c.width) hist.shift();
   const g = c.getContext('2d');
   g.clearRect(0, 0, c.width, c.height);
-  const lo = Math.min(...hist), hi = Math.max(...hist);
+  const lo = _arrayMin(hist), hi = _arrayMax(hist);
   const span = Math.max(1e-6, hi - lo);
   g.strokeStyle = '#8b7cf6'; g.beginPath();
   hist.forEach((v, k) => {
@@ -301,7 +334,7 @@ window.loadIqPlots = async function (channelId, outdir, offset) {
   _iqAbort[channelId] = ac;
   let r;
   try {
-    r = await fetch(`/api/iqplot?outdir=${outdir}&offset=${offset || 0}`,
+    r = await fetch(`/api/iqplot?outdir=${encodeURIComponent(outdir)}&offset=${offset || 0}`,
                     { signal: ac.signal });
   } catch (e) {
     return;   // aborted by a newer scrub position, or network error

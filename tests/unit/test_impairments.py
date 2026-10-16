@@ -109,3 +109,11 @@ def test_phase_noise_scales_with_setting():
     _, r_small = apply(x, FS, ImpairmentConfig(enabled_flag=True, phase_noise_deg_rms=1.0, seed=5))
     _, r_big = apply(x, FS, ImpairmentConfig(enabled_flag=True, phase_noise_deg_rms=10.0, seed=5))
     assert r_big["phase_noise_rad_rms"] > r_small["phase_noise_rad_rms"]
+
+
+def test_non_positive_noise_power_is_rejected():
+    import pytest
+    from backend.models import impairments
+    for bad in (0.0, -1.0):
+        with pytest.raises(ValueError, match="noise_power"):
+            impairments.ImpairmentConfig.from_dict({"noise_power": bad})

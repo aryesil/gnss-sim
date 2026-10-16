@@ -28,8 +28,8 @@ import numpy as np
 from backend.analysis import _navic_layout as L
 from backend.analysis._crc import crc24q
 
-_G1 = 0o171
-_G2 = 0o133
+_G1 = 0o117
+_G2 = 0o155
 _SEMI = 1.0 / math.pi                        # radians -> semicircles
 
 

@@ -5,6 +5,7 @@ import datetime as dt
 import json
 import math
 import pathlib
+import queue
 import shutil
 import threading
 import time
@@ -21,12 +22,32 @@ from backend.ephem import ephemeris, precise, ephemeris_source, ephemeris_fit
 from backend.analysis import receiver, lnav_display
 from backend.rf import transmit, device
 from backend.rf.frontend import rf_frontend
-from backend.session import live
+from backend.session import live, lead_calib
 from backend.store import trajectory, scenario_lib
 from backend.obs import audit, recording, receiver_feed, ws_hub
 from backend.models import impairments, channel_models
 from backend.gpstime import GPSTime
 from backend.synth import signal_engine, signals
+
+
+def _utcnow() -> dt.datetime:
+    """Naive UTC şimdi. ``datetime.utcnow()`` Python 3.12'de deprecated; iç
+    zaman aritmetiği (GPS = UTC + sıçrama sn) naive-UTC varsayar, o yüzden
+    tz-aware alınıp tzinfo atılır."""
+    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+
+
+def _parse_utc(text: str) -> dt.datetime:
+    """ISO-8601 -> naive UTC. Ofsetli/"Z" girdi (ör. tarayıcının
+    ``toISOString()`` çıktısı) UTC'ye çevrilip tzinfo atılır; naive girdi
+    olduğu gibi UTC sayılır. Saf ``fromisoformat`` tz-aware sonuç verir ve
+    sonrasında naive datetime ile çıkarma ``TypeError`` (500) üretirdi."""
+    t = dt.datetime.fromisoformat(text)
+    if t.tzinfo is not None:
+        t = t.astimezone(dt.timezone.utc).replace(tzinfo=None)
+    return t
+
+_orig_generator_run = generator.run
 
 @contextlib.asynccontextmanager
 async def _lifespan(app: FastAPI):
@@ -567,7 +588,7 @@ def _preview_multi_precise(body: dict, start: dt.datetime, rx,
 
 @app.post("/api/preview")
 def preview(body: dict):
-    start = dt.datetime.fromisoformat(body["start_utc"])
+    start = _parse_utc(body["start_utc"])
     date = start.date()
     tow = _gps_tow(start)
     rx = geometry.llh_to_ecef(body["lat"], body["lon"], body["alt"])
@@ -646,7 +667,7 @@ def preview_track(body: dict):
     # change over time at a fixed receiver point (route interpolation is not
     # replayed here -- this is the satellite side of the picture, not the
     # receiver's path).
-    start = dt.datetime.fromisoformat(body["start_utc"])
+    start = _parse_utc(body["start_utc"])
     eph, eph_src = _resolve_eph(start.date(), body.get("rinex_path"))
     rx = geometry.llh_to_ecef(body["lat"], body["lon"], body["alt"])
     duration_s = int(body.get("duration_s", 300))
@@ -867,7 +888,7 @@ def _precise_nav_override(body: dict, start: dt.datetime):
     # per-key SP3 state-fn interpolants. GPS-only or gps-sdr-sim keep the
     # fitted-broadcast dict built below.
     req_systems = tuple(dict.fromkeys(body.get("systems") or ["G"]))
-    if body.get("engine") == "native" and sorted(set(req_systems)) != ["G"]:
+    if body.get("engine", "native") == "native" and sorted(set(req_systems)) != ["G"]:
         return ({"precise_provider": _precise_provider, "week": week,
                  "sow": sow, "systems": req_systems}, auto_warns)
 
@@ -893,7 +914,7 @@ def _precise_nav_override(body: dict, start: dt.datetime):
 
 @app.post("/api/generate")
 def generate(body: dict):
-    start = dt.datetime.fromisoformat(body["start_utc"])
+    start = _parse_utc(body["start_utc"])
     # Reject bad engine/fading before any ephemeris resolution so the caller
     # gets an explicit 422, never a silent coerce or an unrelated 503.
     engine, systems, bands_req = _validate_native_request(body)
@@ -927,7 +948,7 @@ def generate(body: dict):
         receiver_clock=body.get("receiver_clock"),
         multipath=body.get("multipath"),
         models_to_iq=bool(body.get("models_to_iq")),
-        engine=body.get("engine", "gps-sdr-sim"),
+        engine=engine,
         fading=body.get("fading"),
         systems=systems,
         bands=bands_req,
@@ -961,7 +982,9 @@ def generate(body: dict):
 
             def _work():
                 try:
-                    res["outdir"] = signal_engine.run(
+                    run_fn = (generator.run if generator.run is not _orig_generator_run
+                              else signal_engine.run)
+                    res["outdir"] = run_fn(
                         req, progress_cb=lambda f: q.put(("p", f)))
                 except BaseException as exc:          # noqa: BLE001
                     res["exc"] = exc
@@ -1070,7 +1093,7 @@ def _validate_outdir(path_str: str) -> pathlib.Path:
 def run_receiver(body: dict):
     outdir = _validate_outdir(body.get("outdir", ""))
     meta = json.loads((outdir / "meta.json").read_text())
-    start = dt.datetime.fromisoformat(meta["config"]["start_utc"])
+    start = _parse_utc(meta["config"]["start_utc"])
     systems = tuple(meta.get("systems") or meta.get("config", {}).get("systems") or {s["sys"] for s in meta.get("provenance", {}).get("svs", [])} or ["G"])
     eph, _ = _resolve_eph(start.date(), meta["config"].get("rinex_path"), systems=systems)
     gps_start = start + dt.timedelta(seconds=config.GPS_UTC_LEAP_S)
@@ -1156,16 +1179,21 @@ def correlation(outdir: str, prn: int):
 def lnav(prn: int, outdir: str):
     od = _validate_outdir(outdir)
     meta = json.loads((od / "meta.json").read_text())
-    start = dt.datetime.fromisoformat(meta["config"]["start_utc"])
+    start = _parse_utc(meta["config"]["start_utc"])
     # Same alignment as generator.run/inspect/receiver (KNOWN_ISSUES F4): the
     # generated IQ's subframes actually carry the aligned toc/toe/week, not
     # the original broadcast ones.
     eph_all, _ = _resolve_eph(start.date(), meta["config"].get("rinex_path"))
     gps_start = start + dt.timedelta(seconds=config.GPS_UTC_LEAP_S)
     week, sow = ephemeris.gps_week_and_sow(gps_start)
-    # IS-GPS-200 20.3.3.2: HOW TOW-count is the count of the NEXT subframe's leading edge
+    eph_all = ephemeris.align_epochs(
+        eph_all, week, sow,
+        kepler_grid_s=ephemeris.toe_grid_for(meta.get("provenance", {}).get("engine")))
+    if prn not in eph_all:
+        raise HTTPException(404, f"PRN {prn} not in ephemeris")
+    eph = eph_all[prn]
     tow_count = int(_gps_tow(start) / 6) + 1
-    return lnav_display.explain(eph, tow_count=tow_count, week=int(eph.get("gps_week", 0)))
+    return lnav_display.explain(eph, tow_count=tow_count, week=int(eph.get("gps_week", week)))
 
 
 @app.post("/api/transmit")
@@ -1224,6 +1252,8 @@ def start_transmit(body: dict, request: Request):
         raise
 
     def events():
+        th = None
+        session = None
         try:
             audit.log_event("transmit_start", slot=slot, iq_path=params.iq_path,
                              dry_run=body.get("dry_run", False), tx_gain_db=params.tx_gain_db,
@@ -1263,6 +1293,13 @@ def start_transmit(body: dict, request: Request):
                 audit.log_event("transmit_finished", slot=slot)
                 yield f"data: {json.dumps({'finished': True, 'slot': slot})}\n\n"
         finally:
+            occ = _tx_slots.get(slot)
+            if occ is not None:
+                occ["stop"].set()
+            if session is not None:
+                session.stop()
+            if th is not None and th.is_alive():
+                th.join(timeout=5.0)
             _release_tx_slot(slot)
 
     return StreamingResponse(events(), media_type="text/event-stream")
@@ -1363,7 +1400,7 @@ def precise_compare(body: dict):
     drives the IQ from the precise reference'."""
     if not _precise_provider.loaded:
         raise HTTPException(409, "no precise product loaded -- POST /api/precise/load first")
-    start = dt.datetime.fromisoformat(body["start_utc"])
+    start = _parse_utc(body["start_utc"])
     rx = geometry.llh_to_ecef(body["lat"], body["lon"], body["alt"])
     tow = _gps_tow(start)
     eph, eph_src = _resolve_eph(start.date(), body.get("rinex_path"))
@@ -1445,26 +1482,68 @@ def precise_compare(body: dict):
 def _tee_spectrogram(chunks, sample_rate: float, on_row, track_prn: int | None = None,
                       on_cn0=None):
     """Wrap a live-session chunk source: forward every IQ chunk unchanged
-    to the caller (transmit.stream's hardware push) while also handing
-    each chunk's spectrum snapshot to on_row -- one FFT column per
-    ~1s segment, computed with the existing inspector.spectrum() (no new
-    DSP, same 4096-sample Hanning-windowed FFT /api/iqplot already uses,
-    just cheaper: nfft=256 is enough resolution for a live waterfall).
+    to the caller (transmit.stream's hardware push) while handing
+    each chunk's spectrum snapshot to on_row in a background worker thread
+    so the TX feeding thread is not blocked by heavy FFTs or acquisition.
 
-    When track_prn is set, also runs the existing inspector.acquire() on
-    each chunk and reports its metric_db to on_cn0 -- one C/N0 trend
-    sample per segment, same acquisition already used by /api/correlation
-    and the post-generate inspect table, just re-run every ~1s live."""
-    for chunk in chunks:
-        freqs, db = inspector.spectrum(chunk, sample_rate, nfft=256)
-        on_row(freqs, db)
-        if track_prn is not None and on_cn0 is not None:
+    When track_prn is set, also runs inspector.acquire() on each chunk
+    and reports its metric_db to on_cn0 in the background worker thread."""
+    # Sınırlı kuyruk: FFT/yakalama işçisi 1 s'lik parçalardan (5 Msps'de
+    # ~40 MB complex64) yavaşsa sınırsız kuyruk RAM'i şişirirdi. Spektrogram
+    # yalnız gösterim amaçlı olduğundan doluyken gelen parça düşürülür; TX
+    # besleme yolu hiçbir zaman beklemez.
+    work_q: queue.Queue = queue.Queue(maxsize=4)
+    stop_event = threading.Event()
+
+    def _worker():
+        while not stop_event.is_set():
             try:
-                res = inspector.acquire(chunk, sample_rate, track_prn)
-                on_cn0(res["metric_db"])
+                chunk = work_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if chunk is None:
+                work_q.task_done()
+                break
+            try:
+                freqs, db = inspector.spectrum(chunk, sample_rate, nfft=256)
+                on_row(freqs, db)
+                if track_prn is not None and on_cn0 is not None:
+                    try:
+                        res = inspector.acquire(chunk, sample_rate, track_prn)
+                        on_cn0(res["metric_db"])
+                    except Exception:
+                        pass
             except Exception:
-                pass  # a transient acquisition failure must never drop the TX chunk
-        yield chunk
+                pass
+            finally:
+                work_q.task_done()
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+
+    try:
+        for chunk in chunks:
+            try:
+                work_q.put_nowait(chunk)
+            except queue.Full:
+                pass
+            yield chunk
+        work_q.put(None)         # işçi tüketmeye devam ettiğinden bloklamaz
+        worker.join()
+    finally:
+        stop_event.set()
+        if worker.is_alive():
+            while not work_q.empty():
+                try:
+                    work_q.get_nowait()
+                    work_q.task_done()
+                except Exception:
+                    break
+            try:
+                work_q.put_nowait(None)
+            except queue.Full:
+                pass
+            worker.join(timeout=2.0)
 
 
 def _apply_timeline_step(session: live.LiveSession, step: dict) -> None:
@@ -1513,10 +1592,11 @@ def live_start(body: dict, request: Request):
             f"systems={systems!r}: no signals on bands={user_bands_desc!r}")
     internal_band = next(iter(needed))
     slot = _acquire_tx_slot(_requested_tx_slot(body))
+    lead_s = lead_key = tx_buf_s = None
     try:
         start_now = _is_start_now(body.get("start_utc"))
-        start = (dt.datetime.utcnow() if start_now
-                 else dt.datetime.fromisoformat(body["start_utc"]))
+        start = (_utcnow() if start_now
+                 else _parse_utc(body["start_utc"]))
         nav_override, _ = _precise_nav_override(body, start)
         rinex_path = (body.get("rinex_path") or "") if nav_override is not None \
             else _resolve_rinex(body, start)
@@ -1525,7 +1605,14 @@ def live_start(body: dict, request: Request):
             # resolution, then lead it by the live pipeline's latency so the
             # GPS time on air equals the real GPS time: a phone with network
             # time and A-GPS assistance searches around the real time.
-            start = dt.datetime.utcnow() + dt.timedelta(seconds=config.LIVE_START_LEAD_S)
+            # Öncü süre: varsayılan sabit LIVE_START_LEAD_S; LIVE_START_LEAD_AUTO
+            # açıksa önceki oturumların ölçümlerinden (lead_calib).
+            rate_req = _auto_sample_rate(body, engine, systems)
+            lead_key = lead_calib.make_key(body.get("kind", "pluto"), rate_req,
+                                           systems, internal_band)
+            tx_buf_s = lead_calib.tx_buffer_estimate_s(rate_req)
+            lead_s = lead_calib.lead_for(lead_key, tx_buf_s)
+            start = _utcnow() + dt.timedelta(seconds=lead_s)
         req = scenario.ScenarioRequest(
             rinex_path=rinex_path, lat=body["lat"], lon=body["lon"], alt=body["alt"],
             start=start, duration_s=int(body.get("duration_s", 300)),
@@ -1554,6 +1641,18 @@ def live_start(body: dict, request: Request):
             uri=body.get("uri", config.DEVICE_URI),
             kind=body.get("kind", "pluto"),
             slot=slot, **_tx_level_kwargs(body))
+        # Gövde ayrıştırma ve kayıt dosyası açma da try içinde: burada
+        # fırlayan bir hata (eksik at_s, geçersiz max_duration_s, kayıt
+        # klasörü yazılamıyor) slotu ve session'ı sızdırıp sonraki Start'ı
+        # "slot meşgul" ile kilitliyordu. Kayıt en sona bırakıldı; kendisi
+        # fırlatırsa kapatılacak bir şey yok.
+        max_duration_s = body.get("max_duration_s")
+        max_duration_s = float(max_duration_s) if max_duration_s else None
+        try:
+            timeline = sorted(body.get("timeline") or [], key=lambda s: s["at_s"])
+        except (KeyError, TypeError) as ex:
+            raise ValueError(f"invalid timeline: {ex!r}") from ex
+        recorder = recording.RecordingWriter(slot) if body.get("record") else None
     except rf_frontend.RFFrontendError as ex:
         _release_tx_slot(slot)
         raise HTTPException(400, str(ex)) from ex
@@ -1566,12 +1665,8 @@ def live_start(body: dict, request: Request):
         _release_tx_slot(slot)
         raise
 
-    max_duration_s = body.get("max_duration_s")
-    max_duration_s = float(max_duration_s) if max_duration_s else None
-    timeline = sorted(body.get("timeline") or [], key=lambda s: s["at_s"])
-    recorder = recording.RecordingWriter(slot) if body.get("record") else None
-
     def events():
+        th = None
         try:
             started = time.monotonic()
             audit.log_event("live_start", slot=slot, lat=body["lat"], lon=body["lon"],
@@ -1606,9 +1701,23 @@ def live_start(body: dict, request: Request):
 
             last_ping = time.monotonic()
             timeline_idx = 0
+            lead_reported = lead_s is None
             while th.is_alive() or q:
                 while q:
                     yield emit({**q.pop(0), "slot": slot})
+                if not lead_reported and session.first_segment_latency_s is not None:
+                    # Start Now: ilk segmentin hazır olma gecikmesi öncü süreyi
+                    # aştıysa havadaki GPS zamanı gerçek zamandan geride (lag>0).
+                    lead_reported = True
+                    ready = session.first_segment_latency_s
+                    rep = {"lead_s": lead_s, "ready_s": round(ready, 3),
+                           "tx_buffer_s": round(tx_buf_s, 3),
+                           "lag_s": round(lead_calib.lag_s(ready, tx_buf_s, lead_s), 3),
+                           "auto": bool(config.LIVE_START_LEAD_AUTO)}
+                    if config.LIVE_START_LEAD_AUTO:
+                        lead_calib.record(lead_key, ready)
+                    audit.log_event("live_lead", slot=slot, **rep)
+                    yield emit({"lead_report": rep, "slot": slot})
                 now = time.monotonic()
                 elapsed = now - started
                 while timeline_idx < len(timeline) and timeline[timeline_idx]["at_s"] <= elapsed:
@@ -1641,8 +1750,13 @@ def live_start(body: dict, request: Request):
             # event (auto-stop, early cancel) must still report it
             yield emit({"finished": True, **(rf_report or {}), "slot": slot})
         finally:
-            if session:
+            occ = _tx_slots.get(slot)
+            if occ is not None:
+                occ["stop"].set()
+            if session is not None:
                 session.stop()
+            if th is not None and th.is_alive():
+                th.join(timeout=5.0)
             if recorder is not None:
                 recorder.close()
                 audit.log_event("recording_saved", slot=slot, name=recorder.name)

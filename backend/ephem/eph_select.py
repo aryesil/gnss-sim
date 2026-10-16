@@ -33,6 +33,12 @@ DEFAULT_MAX_AGE_S = 7200.0
 DEFAULT_MAX_LEAD_S = 7200.0
 
 
+def _toc_near_toe(week: int, toc_sow: float, toe_abs: float) -> float:
+    """toc (hafta-içi saniye) -> toe'ya en yakın haftadaki sürekli GPS saniyesi."""
+    toc_abs = week * _WEEK + toc_sow
+    return toc_abs + _WEEK * round((toe_abs - toc_abs) / _WEEK)
+
+
 class EphemerisSelectionError(Exception):
     """No acceptable record for a requested PRN at the scenario epoch."""
 
@@ -85,9 +91,12 @@ def _to_datetime(ts) -> dt.datetime:
     return dt.datetime(1970, 1, 1) + dt.timedelta(seconds=int(secs))
 
 
+import math
+
+
 def parse_rinex_records(path) -> dict[int, list[RecordRef]]:
     """Every GPS navigation record in ``path``, grouped by PRN, unsorted."""
-    nav = gr.load(str(path), use="G")
+    nav = gr.load(ephemeris._georinex_source(path), use="G")
     out: dict[int, list[RecordRef]] = {}
     for sv in nav.sv.values:
         if not str(sv).startswith("G"):
@@ -96,29 +105,40 @@ def parse_rinex_records(path) -> dict[int, list[RecordRef]]:
         sub = nav.sel(sv=sv).dropna(dim="time", how="all")
         for i in range(int(sub.time.size)):
             rec = sub.isel(time=i)
-            e: dict[str, float] = {}
-            for key, var in ephemeris._VARMAP.items():
-                if var is None:
-                    continue
-                try:
-                    e[key] = float(rec[var].values)
-                except (KeyError, ValueError):
-                    e[key] = 0.0
+            e = _record_from_xarray(rec)
             toc_dt = _to_datetime(rec.time.values)
             e["toc"] = ((toc_dt - ephemeris._GPS_EPOCH).total_seconds()) % _WEEK
             week = int(e.get("gps_week", 0))
+            toe_abs = week * _WEEK + float(e["toe"])
+            # toc hafta-içi saniye (mod _WEEK); toe'nun haftasına doğrudan
+            # eklemek hafta sınırında bir hafta sapar (toe=604 794, toc=0).
+            # toc, toe'ya en yakın haftaya oturtulur.
+            toc_abs = _toc_near_toe(week, float(e["toc"]), toe_abs)
             ref = RecordRef(
                 prn=prn,
-                toe_gps_s=week * _WEEK + float(e["toe"]),
-                toc_gps_s=week * _WEEK + float(e["toc"]),
+                toe_gps_s=toe_abs,
+                toc_gps_s=toc_abs,
                 gps_week=week,
-                iode=int(e["iode"]) if "iode" in e else None,
-                iodc=int(e["iodc"]) if "iodc" in e else None,
+                iode=int(e["iode"]) if "iode" in e and not math.isnan(e["iode"]) else None,
+                iodc=int(e["iodc"]) if "iodc" in e and not math.isnan(e["iodc"]) else None,
                 health=int(e.get("health", 0)),
                 eph=e,
             )
             out.setdefault(prn, []).append(ref)
     return out
+
+
+def _record_from_xarray(rec) -> dict[str, float]:
+    e: dict[str, float] = {}
+    for key, var in ephemeris._VARMAP.items():
+        if var is None:
+            continue
+        try:
+            val = float(rec[var].values)
+            e[key] = 0.0 if math.isnan(val) else val
+        except (KeyError, ValueError):
+            e[key] = 0.0
+    return e
 
 
 def select(records_by_prn: dict[int, list[RecordRef]],

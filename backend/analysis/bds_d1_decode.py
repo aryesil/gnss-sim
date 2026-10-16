@@ -61,6 +61,22 @@ def bch_ok(cw15: list[int] | tuple[int, ...] | np.ndarray) -> bool:
     return bch_syndrome(cw15) == 0
 
 
+def _decode_cw(
+    codeword_15: list[int] | tuple[int, ...] | np.ndarray,
+    correct: bool = True,
+) -> tuple[list[int], bool, bool]:
+    cw = [int(b) & 1 for b in codeword_15]
+    if len(cw) != 15:
+        raise ValueError(f"expected 15 bits, got {len(cw)}")
+    syn = bch_syndrome(cw)
+    if syn == 0:
+        return cw[:11], True, False
+    if correct and syn in _SYNDROME_TO_BIT:
+        cw[_SYNDROME_TO_BIT[syn]] ^= 1
+        return cw[:11], bch_ok(cw), True
+    return cw[:11], False, False
+
+
 def bch_decode(
     codeword_15: list[int] | tuple[int, ...] | np.ndarray,
     correct: bool = True,
@@ -70,17 +86,8 @@ def bch_decode(
     Checks parity with g(x) = x^4 + x + 1. If correct=True, corrects single-bit
     errors using syndrome lookup. Returns the 11 data bits.
     """
-    cw = [int(b) & 1 for b in codeword_15]
-    if len(cw) != 15:
-        raise ValueError(f"expected 15 bits, got {len(cw)}")
-    syn = bch_syndrome(cw)
-    if syn == 0:
-        return cw[:11]
-    if correct and syn in _SYNDROME_TO_BIT:
-        bit_idx = _SYNDROME_TO_BIT[syn]
-        cw[bit_idx] ^= 1
-        return cw[:11]
-    return cw[:11]
+    data11, _, _ = _decode_cw(codeword_15, correct=correct)
+    return data11
 
 
 def deinterleave_words(
@@ -110,7 +117,10 @@ _s = unpack_int
 _field = unpack_field
 
 
-def decode_subframe(bits_300: list[int] | tuple[int, ...] | np.ndarray) -> dict[str, Any]:
+def decode_subframe(
+    bits_300: list[int] | tuple[int, ...] | np.ndarray,
+    correct: bool = True,
+) -> dict[str, Any]:
     """Parse a 300-bit subframe, extract FraID (1..5), SOW, and 224 information bits.
 
     Returns dict with keys:
@@ -128,13 +138,18 @@ def decode_subframe(bits_300: list[int] | tuple[int, ...] | np.ndarray) -> dict[
     if words[0][:11] != PREAMBLE:
         raise ValueError("preamble mismatch")
 
-    ok = bch_ok(words[0][15:30])
-    info = list(words[0][:15]) + bch_decode(words[0][15:30])
+    d0, ok0, corr0 = _decode_cw(words[0][15:30], correct=correct)
+    ok = ok0
+    n_corr = int(corr0)
+    info = list(words[0][:15]) + d0
 
     for w in words[1:]:
         a, b_cw = deinterleave_words(w)
-        ok = ok and bch_ok(a) and bch_ok(b_cw)
-        info += bch_decode(a) + bch_decode(b_cw)
+        da, oka, corra = _decode_cw(a, correct=correct)
+        db, okb, corrb = _decode_cw(b_cw, correct=correct)
+        ok = ok and oka and okb
+        n_corr += int(corra) + int(corrb)
+        info += da + db
 
     fra_id = _u(info, 15, 3)
     sow = _u(info, 18, 20)
@@ -144,6 +159,7 @@ def decode_subframe(bits_300: list[int] | tuple[int, ...] | np.ndarray) -> dict[
         "sow": sow,
         "info": info,
         "bch_ok": bool(ok),
+        "_n_corrected": n_corr,
     }
 
 
@@ -162,8 +178,12 @@ def decode_messages(
         while i + 300 <= n:
             if stream[i : i + 11] == PREAMBLE:
                 try:
-                    sf = decode_subframe(stream[i : i + 300])
-                    if sf["bch_ok"]:
+                    sf = decode_subframe(stream[i : i + 300], correct=True)
+                    if (
+                        sf["bch_ok"]
+                        and 1 <= sf["fra_id"] <= 5
+                        and sf.get("_n_corrected", 0) <= 4
+                    ):
                         msgs.append(sf)
                         i += 300
                         continue

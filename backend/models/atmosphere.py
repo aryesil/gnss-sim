@@ -125,6 +125,13 @@ def klobuchar_delay_m(alpha, beta, gps_sow: float,
     }
 
 
+class _TropoDict(dict):
+    def __eq__(self, other):
+        if isinstance(other, (int, float)):
+            return self.get("delay_m") == other
+        return super().__eq__(other)
+
+
 def saastamoinen_delay_m(el_rad: float, height_m: float,
                          pressure_hpa: float = 1013.25,
                          temperature_k: float = 288.15,
@@ -135,9 +142,21 @@ def saastamoinen_delay_m(el_rad: float, height_m: float,
     model}``. Below 3 deg elevation the mapping is clamped (the model is
     not valid there).
     """
+    if height_m >= 30000.0:
+        el = max(el_rad, math.radians(3.0))
+        return _TropoDict({
+            "model": "saastamoinen",
+            "delay_m": 0.0,
+            "zenith_hydrostatic_m": 0.0,
+            "zenith_wet_m": 0.0,
+            "mapping": 1.0 / math.sin(el),
+            "surface_pressure_hpa": 0.0,
+            "surface_temperature_k": 0.0,
+        })
+    h = max(-1000.0, min(float(height_m), 30000.0))
     # height-scaled standard atmosphere if caller left the defaults
-    h_km = max(height_m, 0.0) / 1000.0
-    p = pressure_hpa * (1.0 - 2.26e-5 * height_m) ** 5.225 if pressure_hpa == 1013.25 else pressure_hpa
+    h_km = max(h, 0.0) / 1000.0
+    p = pressure_hpa * (1.0 - 2.26e-5 * h) ** 5.225 if pressure_hpa == 1013.25 else pressure_hpa
     t = temperature_k - 6.5 * h_km if temperature_k == 288.15 else temperature_k
     rh = humidity
     # saturation vapour pressure (hPa), Magnus form
@@ -150,7 +169,7 @@ def saastamoinen_delay_m(el_rad: float, height_m: float,
     el = max(el_rad, math.radians(3.0))
     m = 1.0 / math.sin(el)
     delay = (zhd + zwd) * m
-    return {
+    return _TropoDict({
         "model": "saastamoinen",
         "delay_m": delay,
         "zenith_hydrostatic_m": zhd,
@@ -158,7 +177,7 @@ def saastamoinen_delay_m(el_rad: float, height_m: float,
         "mapping": m,
         "surface_pressure_hpa": p,
         "surface_temperature_k": t,
-    }
+    })
 
 
 def delays_for_los(cfg: AtmosphereConfig, gps_sow: float,

@@ -415,6 +415,28 @@ def dop(entries: list[dict], rx_ecef) -> dict:
     }
 
 
+def galileo_clock_shift_s(rec: dict | None, target: str) -> float:
+    """Galileo af0'ının ``rec["clk_ref"]`` referansından ``target`` ("E5A" ya
+    da "E5B") IF referansına taşınması için eklenecek sabit (saniye).
+
+    IF_a = IF_b + Δ, Δ = BGD(E1,E5a) - BGD(E1,E5b) (OS SIS ICD 5.1.4-5.1.5):
+    E5B -> E5A için +Δ, E5A -> E5B için -Δ, aynı referans veya etiket yoksa 0.
+    Δ için iki BGD de kayıtta bulunmalı (yalnızca F/NAV'dan çözülmüş kayıtta
+    BGD(E1,E5b) yoktur; orada Δ bilinmez ve 0 alınır).
+    """
+    r = rec or {}
+    ref = str(r.get("clk_ref", "")).upper()
+    if ref not in ("E5A", "E5B") or ref == target or "tgd_e5a" not in r or "tgd" not in r:
+        return 0.0
+    try:
+        delta = float(r["tgd_e5a"]) - float(r["tgd"])
+    except (TypeError, ValueError):
+        return 0.0
+    if delta != delta:
+        return 0.0
+    return delta if target == "E5A" else -delta
+
+
 def group_delay_bias_s(sysc: str, band: str, rec: dict | None) -> float:
     """Single-frequency satellite group-delay term (seconds) that a receiver
     adds to the broadcast clock polynomial for this signal -- the
@@ -446,9 +468,18 @@ def group_delay_bias_s(sysc: str, band: str, rec: dict | None) -> float:
             return -g("tgd") + g("isc_l5i5")
         return -g("tgd")
     if sysc == "E":
+        # Kayıttaki af0..af2 hangi iyonosfer-bağımsız (IF) kombinasyona göre
+        # verilmişse (clk_ref), yayın zamanlaması da o referansa göre
+        # kurulmalı: IF_a = IF_b + Δ, Δ = BGD(E1,E5a) - BGD(E1,E5b).
+        #   * clk_ref "E5B" (I/NAV): E1 = af0 - BGD_b (düzeltme yok),
+        #     E5a = af0 + Δ - γ*BGD_a.
+        #   * clk_ref "E5A" (F/NAV): E5a = af0 - γ*BGD_a (düzeltme yok),
+        #     E1 = af0 - BGD_a = af0 - BGD_b - Δ.
+        # clk_ref yoksa eski davranış (Δ uygulanmaz) korunur.
+        d = galileo_clock_shift_s(r, "E5A" if band == "L5" else "E5B")
         if band == "L5":
-            return -((config.L1_HZ / config.L5_HZ) ** 2) * g("tgd_e5a", g("tgd"))
-        return -g("tgd")
+            return -((config.L1_HZ / config.L5_HZ) ** 2) * g("tgd_e5a", g("tgd")) + d
+        return -g("tgd") + d
     if sysc == "C":
         if band == "L5":
             return -g("tgd_b2ap", g("tgd")) + g("isc_b2ad")

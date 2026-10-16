@@ -3,11 +3,22 @@ window._liveChannels = window._liveChannels || new Set();
 function _updateRfBar() {
   const bar = document.getElementById('rf-status-bar');
   if (!bar) return;
-  if (window._liveChannels.size > 0) {
-    bar.textContent = '● RF TRANSMITTING — SHIELDED TEST ENVIRONMENT ONLY';
+  let textSpan = bar.querySelector('#rf-status-text');
+  if (!textSpan) {
+    Array.from(bar.childNodes).forEach(n => {
+      if (n.nodeType === Node.TEXT_NODE) bar.removeChild(n);
+    });
+    textSpan = document.createElement('span');
+    textSpan.id = 'rf-status-text';
+    const btn = bar.querySelector('#btn-api-key');
+    if (btn) bar.insertBefore(textSpan, btn);
+    else bar.appendChild(textSpan);
+  }
+  if (window._liveChannels && window._liveChannels.size > 0) {
+    textSpan.textContent = '● RF TRANSMITTING — SHIELDED TEST ENVIRONMENT ONLY';
     bar.className = 'rf-on';
   } else {
-    bar.textContent = 'RF OUTPUT: OFF';
+    textSpan.textContent = 'RF OUTPUT: OFF';
     bar.className = 'rf-off';
   }
 }
@@ -49,8 +60,12 @@ window.enableLiveTabs = function (channelId, txSlot) {
 
 window.disableLiveTabs = function (channelId) {
   window._liveChannels.delete(channelId); _updateRfBar();
-  document.getElementById(`${channelId}-live-hint`).hidden = false;
-  document.getElementById(`${channelId}-jog-controls`).hidden = true;
-  document.getElementById(`${channelId}-time-controls`).hidden = true;
-  channelState(channelId).txSlot = null;
+  const hint = document.getElementById(`${channelId}-live-hint`);
+  if (hint) hint.hidden = false;
+  const jog = document.getElementById(`${channelId}-jog-controls`);
+  if (jog) jog.hidden = true;
+  const time = document.getElementById(`${channelId}-time-controls`);
+  if (time) time.hidden = true;
+  const st = typeof channelState === 'function' ? channelState(channelId) : null;
+  if (st) st.txSlot = null;
 };

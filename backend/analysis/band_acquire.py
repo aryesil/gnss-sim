@@ -10,6 +10,7 @@ constants).
 """
 from __future__ import annotations
 
+import functools
 import numpy as np
 
 from backend.synth import _lib
@@ -38,13 +39,14 @@ def acquire(iq, fs, code, *, chip_hz, code_len, center_hz=0.0,
     LOC = np.conj(np.fft.fft(local))
 
     best_pk, best, best_floor = -1.0, (0.0, 0), 1.0
+    t_all = np.arange(nc * npp) / fs
     for fd in np.arange(-dopp_hz, dopp_hz + 1, dopp_step):
+        ph_all = np.exp(-1j * 2 * np.pi * (center_hz + fd) * t_all)
+        seg_derot = seg * ph_all
         acc = np.zeros(npp)
         for k in range(nc):
-            blk = seg[k * npp:(k + 1) * npp]
-            ph = np.exp(-1j * 2 * np.pi * (center_hz + fd) *
-                        np.arange(k * npp, (k + 1) * npp) / fs)
-            acc += np.abs(np.fft.ifft(np.fft.fft(blk * ph) * LOC)) ** 2
+            blk_ph = seg_derot[k * npp : (k + 1) * npp]
+            acc += np.abs(np.fft.ifft(np.fft.fft(blk_ph) * LOC)) ** 2
         pk = acc.max()
         if pk > best_pk:
             best_pk = pk
@@ -73,12 +75,13 @@ def fine_code_phase(iq, fs, code, *, chip_hz, code_len, dopp_hz,
     t = np.arange(npp) / fs
     local = code[np.floor(t * chip_hz).astype(np.int64) % code_len]
     LOC = np.conj(np.fft.fft(local))
+    t_all = np.arange(nc * npp) / fs
+    ph_all = np.exp(-1j * 2 * np.pi * (center_hz + dopp_hz) * t_all)
+    seg_derot = seg * ph_all
     acc = np.zeros(npp)
     for k in range(nc):
-        blk = seg[k * npp:(k + 1) * npp]
-        ph = np.exp(-1j * 2 * np.pi * (center_hz + dopp_hz) *
-                    np.arange(k * npp, (k + 1) * npp) / fs)
-        acc += np.abs(np.fft.ifft(np.fft.fft(blk * ph) * LOC))
+        blk_ph = seg_derot[k * npp : (k + 1) * npp]
+        acc += np.abs(np.fft.ifft(np.fft.fft(blk_ph) * LOC))
     p = int(acc.argmax())
     y0, y1, y2 = acc[(p - 1) % npp], acc[p], acc[(p + 1) % npp]
     denom = y0 - 2.0 * y1 + y2
@@ -94,6 +97,7 @@ L2C_TDM_CHIP_HZ = 1.023e6
 L2C_TDM_LEN = 20460
 
 
+@functools.lru_cache(maxsize=64)
 def l2c_cm_replica(prn: int) -> np.ndarray:
     """TDM CM replica (float64, 20460 slots at 1.023 Mcps)."""
     cm, _cl = _lib.code_l2c(int(prn))

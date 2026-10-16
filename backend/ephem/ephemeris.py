@@ -196,7 +196,8 @@ def align_epochs(eph_by_prn: dict[int, dict], week: int, sow: float,
                 e2["toe_ref"] = (float(sow) // 16.0) * 16.0
         elif (keep_real_within_s > 0
               and e2.get("system", "G") in _REAL_EPOCH_SYS
-              and "gps_week" in e2
+              and e2.get("gps_week") is not None
+              and not math.isnan(float(e2["gps_week"]))
               and int(e2["gps_week"]) == int(week)   # geometry uses SoW only
               and abs((float(e2["gps_week"]) - week) * _WEEK_SECONDS
                       + float(e2["toe"]) - float(sow)) <= keep_real_within_s):
@@ -254,6 +255,31 @@ def _download(date: dt.date) -> pathlib.Path | None:
     return None
 
 
+def _gal_clock_ref(rec) -> str | None:
+    """Galileo kaydının af0..af2/Toc değerlerinin hangi IF kombinasyonuna ait
+    olduğu: "E5B" (E1-E5b, I/NAV) ya da "E5A" (E1-E5a, F/NAV).
+
+    RINEX 3.04 Tablo A8 DataSrc: bit 8 (256) = saat E5a-E1, bit 9 (512) =
+    E5b-E1. Bu bitler yoksa kaynak mesaj bitlerinden türetilir (bit 0/2 I/NAV,
+    bit 1 F/NAV); I/NAV bitleri varsa I/NAV önceliklidir (_pick_epoch ile
+    aynı). Bilgi yoksa None (etiket eklenmez, Δ düzeltmesi uygulanmaz)."""
+    if "DataSrc" not in rec:
+        return None
+    try:
+        ds = int(float(rec["DataSrc"].values))
+    except (TypeError, ValueError):
+        return None
+    if ds & 0x200:
+        return "E5B"
+    if ds & 0x100:
+        return "E5A"
+    if ds & 0x05:
+        return "E5B"
+    if ds & 0x02:
+        return "E5A"
+    return None
+
+
 def _pick_epoch(sub, noon_gps: float, sysc: str):
     """Select one broadcast record for a satellite, nearest the file's midday.
 
@@ -270,6 +296,8 @@ def _pick_epoch(sub, noon_gps: float, sysc: str):
             wk = float(r[var].values) + wk_off if var in r else 0.0
             toe = float(r["Toe"].values) + t_off if "Toe" in r else 0.0
             d = abs(wk * _WEEK_SECONDS + toe - noon_gps)
+            if math.isnan(d):
+                continue
             if best_d is None or d < best_d:
                 best_i, best_d = i, d
             if sysc == "E" and "DataSrc" in r:
@@ -454,6 +482,10 @@ def _parse_rinex_multi(path: str | pathlib.Path, systems=("G",),
             if var is None or var not in rec:
                 continue
             e[key] = float(rec[var].values)
+        if s == "E":
+            ref = _gal_clock_ref(rec)
+            if ref:
+                e["clk_ref"] = ref
         epoch_sow = _seconds_of_week(_to_datetime(rec.time.values))
         if s in _KEPLER_SYS:
             # toc is the record's own clock reference epoch (distinct from toe).

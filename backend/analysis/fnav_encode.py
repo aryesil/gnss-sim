@@ -35,6 +35,7 @@ import numpy as np
 from backend.analysis import _fnav_layout as L
 from backend.analysis._crc import crc24q
 from backend.analysis.inav_encode import sisa_index
+from backend.geometry import galileo_clock_shift_s
 
 _PREAMBLE = [1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0]     # 12 uncoded symbols
 # Galileo OS SIS ICD Bölüm 4.2.3: G1 = 0o171, G2 = 0o133 (G2 terslenir).
@@ -137,7 +138,10 @@ def _values_word1(eph: dict, prn: int, week: int, tow: int) -> dict:
     return {
         "type": 1, "prn": prn, "iodnav": _iodnav(eph),
         "toc": eph.get("toc", eph.get("toe", 0.0)),
-        "af0": eph.get("af0", 0.0), "af1": eph.get("af1", 0.0),
+        # F/NAV af0 E1-E5a IF referanslıdır; kayıt I/NAV (E1-E5b) referanslıysa
+        # +Δ ile taşı (geometry.galileo_clock_shift_s), yoksa değişmez.
+        "af0": eph.get("af0", 0.0) + galileo_clock_shift_s(eph, "E5A"),
+        "af1": eph.get("af1", 0.0),
         "af2": eph.get("af2", 0.0),
         # Galileo OS SIS ICD Tablo 57: SISA(E1,E5a) 8-bit indeks
         "sisa": sisa_index(eph.get("sisa")),

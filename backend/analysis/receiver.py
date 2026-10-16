@@ -621,9 +621,10 @@ def fix_from_iq(iq_path, sample_format, sample_rate, eph_by_prn,
         atmo_fn = default_atmo_fn(rinex_path, approx_llh, approx_time_gps) if rinex_path else None
         if not eph_by_prn:
             if decode_nav:
-                from backend.analysis import inav_decode, bds_d1_decode
+                from backend.analysis import inav_decode, bds_d1_decode, nav_encoders
                 eph_by_prn = {}
                 svs = meta.get("provenance", {}).get("svs", [])
+                iq_long_cache: dict[tuple[str, str], np.ndarray] = {}
                 for sv in svs:
                     sysc = sv.get("sys")
                     prn = sv.get("prn")
@@ -635,10 +636,16 @@ def fix_from_iq(iq_path, sample_format, sample_rate, eph_by_prn,
                     else:
                         bf = pathlib.Path(iq_path)
                         b_fs = sample_rate
-                    if bf.exists():
+                    if bf.exists() and sysc in ("G", "E", "C", "S"):
+                        cache_key = (str(bf), sample_format)
+                        if cache_key not in iq_long_cache:
+                            iq_long_cache[cache_key] = inspector.read_iq(
+                                bf, sample_format, max_samples=int(b_fs * 25.0)
+                            )
+                        iq_cached = iq_long_cache[cache_key]
                         if sysc == "G":
                             from backend.analysis import lnav_decode, l1_acquire
-                            iq_long = inspector.read_iq(bf, sample_format, max_samples=int(b_fs * 25.0))
+                            iq_long = iq_cached[:int(b_fs * 25.0)]
                             acq = l1_acquire.acquire_l1(iq_long[:int(b_fs * 0.020)], b_fs, "G", prn, centre_offset_hz=sv.get("if_hz", 0.0))
                             cp = acq.get("code_phase_chips", 0.0)
                             dopp = acq.get("doppler_hz", 0.0)
@@ -658,7 +665,7 @@ def fix_from_iq(iq_path, sample_format, sample_rate, eph_by_prn,
                                     except Exception:
                                         pass
                         elif sysc == "E":
-                            iq_long = inspector.read_iq(bf, sample_format, max_samples=int(b_fs * 14.0))
+                            iq_long = iq_cached[:int(b_fs * 14.0)]
                             syms = inav_decode.demod_symbols_e1b(iq_long, b_fs, prn, centre_offset_hz=sv.get("if_hz", 0.0))
                             if len(syms) >= 500:
                                 msgs = inav_decode.decode_messages(syms)
@@ -669,24 +676,30 @@ def fix_from_iq(iq_path, sample_format, sample_rate, eph_by_prn,
                                 except Exception:
                                     pass
                         elif sysc == "C":
-                            iq_long = inspector.read_iq(bf, sample_format, max_samples=int(b_fs * 24.0))
+                            iq_long = iq_cached[:int(b_fs * 24.0)]
                             syms = bds_d1_decode.demod_symbols_b1i(iq_long, b_fs, prn, centre_offset_hz=sv.get("if_hz", 0.0))
                             if len(syms) >= 300:
                                 msgs = bds_d1_decode.decode_messages(syms)
                                 try:
                                     rec = bds_d1_decode.reconstruct_ephemeris(msgs, prn=prn)
+                                    if "toe" in rec and approx_time_gps is not None:
+                                        diff = ((approx_time_gps - rec["toe"] + 302400.0) % 604800.0) - 302400.0
+                                        if abs(diff - (-nav_encoders.BDT_MINUS_GPS_S)) < 5.0:
+                                            for _k in ("toe", "toc"):
+                                                if _k in rec:
+                                                    rec[_k] = (rec[_k] - nav_encoders.BDT_MINUS_GPS_S) % 604800.0
                                     eph_by_prn[("C", prn)] = rec
                                 except Exception:
                                     pass
                         elif sysc == "S":
                             from backend.analysis import sbas_decode
                             from backend.synth import engine as _synth_eng
-                            iq_long = inspector.read_iq(bf, sample_format, max_samples=int(b_fs * 10.0))
+                            iq_long = iq_cached[:int(b_fs * 10.0)]
                             syms = sbas_decode.demod_symbols_sbas_l1(iq_long, b_fs, prn, centre_offset_hz=sv.get("if_hz", 0.0))
                             if len(syms) >= 500:
                                 msgs = sbas_decode.decode_messages(syms)
                                 try:
-                                    rec = sbas_decode.reconstruct_ephemeris(msgs, prn=prn)
+                                    rec = sbas_decode.reconstruct_ephemeris(msgs, prn=prn, week_sow0=approx_time_gps)
                                     rinex_prn = prn - _synth_eng._PRN_OFFSET.get("S", 0)
                                     eph_by_prn[("S", rinex_prn)] = rec
                                     eph_by_prn[("S", prn)] = rec

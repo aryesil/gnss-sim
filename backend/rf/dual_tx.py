@@ -62,9 +62,20 @@ class _Card:
         self.queues: dict[str, queue.Queue] = {}
         self.underflow: dict[str, int] = {}
         self.active = 0
+        # Pump thread'ini öldüren backend.write hatası (USB kopması, IIO
+        # EIO, ...). Üreticiler bunu enqueue()'da görür; aksi halde 10 s
+        # "queue full" zaman aşımı gerçek nedeni gizlerdi.
+        self.error: Exception | None = None
         self.stop = threading.Event()
         self.pump_thread = threading.Thread(target=self._pump_loop, daemon=True)
-        self.pump_thread.start()
+        # Üretici tıkanınca pump'ın bekleme süresi ~3 blok süresiyle sınırlı
+        # (5 Msps'de ~39 ms). 0.5 s beklemek DAC DMA'sını kuruturdu: ad9361
+        # backend notunda belirtildiği gibi tx_cyclic_buffer=False iken DMA
+        # son buffer'ı tekrarlar -> alıcıya eski (bayat) IQ gider. Kısa
+        # beklemeden sonra sessizlik bloğu beslemek hem hat zamanlamasını
+        # korur hem bayat tekrarı önler.
+        self.get_timeout = max(0.02, min(_GET_TIMEOUT_S,
+                                         3.0 * _BLOCK_SAMPLES / max(sample_rate, 1.0)))
 
     def _pump_loop(self) -> None:
         zero = np.zeros(_BLOCK_SAMPLES, dtype=np.complex64)
@@ -80,12 +91,20 @@ class _Card:
                     blocks.append(zero)
                     continue
                 try:
-                    blocks.append(q.get(timeout=_GET_TIMEOUT_S))
+                    blocks.append(q.get(timeout=self.get_timeout))
                 except queue.Empty:
+                    if stop.is_set():
+                        break
                     with self.lock:
                         self.underflow[slot] = self.underflow.get(slot, 0) + 1
                     blocks.append(zero)
-            self.backend.write(self.handle, blocks)
+            else:
+                try:
+                    self.backend.write(self.handle, blocks)
+                except Exception as ex:
+                    self.error = ex
+                    stop.set()
+                    return
 
     def ensure_channel(self, chan: int) -> None:
         """Make sure ``chan`` is streaming. Only the channels in use are
@@ -94,13 +113,21 @@ class _Card:
         running slot's stream."""
         active = self.backend.active_channels(self.handle)
         if chan in active:
+            if self.queues and not self.pump_thread.is_alive():
+                self.stop = threading.Event()
+                self.pump_thread = threading.Thread(target=self._pump_loop, daemon=True)
+                self.pump_thread.start()
             return
-        self.stop.set()
-        self.pump_thread.join(timeout=5.0)
+        if self.pump_thread.is_alive():
+            self.stop.set()
+            self.pump_thread.join(timeout=5.0)
+            if self.pump_thread.is_alive():
+                raise TransmitError("dual TX pump thread did not stop in time to reconfigure channels")
         self.backend.set_active_channels(self.handle, active + [chan])
-        self.stop = threading.Event()
-        self.pump_thread = threading.Thread(target=self._pump_loop, daemon=True)
-        self.pump_thread.start()
+        if self.queues and not self.pump_thread.is_alive():
+            self.stop = threading.Event()
+            self.pump_thread = threading.Thread(target=self._pump_loop, daemon=True)
+            self.pump_thread.start()
 
     def register(self, slot: str) -> None:
         with self.lock:
@@ -121,9 +148,13 @@ class _Card:
             q = self.queues.get(slot)
         if q is None:
             return  # slot already closed -- drop rather than raise mid-teardown
+        if self.error is not None:
+            raise TransmitError(f"dual TX pump died: {self.error}") from self.error
         try:
             q.put(block, timeout=_PUT_TIMEOUT_S)
         except queue.Full as ex:
+            if self.error is not None:
+                raise TransmitError(f"dual TX pump died: {self.error}") from self.error
             raise TransmitError(
                 f"dual TX pump on {slot} appears stuck (queue full after "
                 f"{_PUT_TIMEOUT_S}s) -- the other TX slot may have stalled "
@@ -131,7 +162,8 @@ class _Card:
 
     def shut_down(self) -> None:
         self.stop.set()
-        self.pump_thread.join(timeout=5.0)
+        if self.pump_thread.is_alive():
+            self.pump_thread.join(timeout=5.0)
         self.backend.close(self.handle)
 
 
@@ -232,10 +264,26 @@ def acquire(slot: str, uri: str, lo_hz: float, sample_rate: float,
             raise TransmitError(
                 f"{slot} unavailable: the shared card exposes only "
                 f"{_card.backend.n_tx_channels(_card.handle)} TX channel(s)")
-        _card.backend.set_gain(_card.handle, chan, tx_gain_db)
-        _card.ensure_channel(chan)
-        _card.register(slot)
-        return _SlotSink(_card, slot)
+        card = _card
+        try:
+            card.backend.set_gain(card.handle, chan, tx_gain_db)
+        except Exception:
+            # Kart bu çağrıda açıldıysa ve hiç slot kaydı yoksa kapat; yoksa
+            # _card bayat kalır, sonraki acquire kapalı/yarım kartı yeniden
+            # kullanır.
+            if card.active <= 0:
+                card.shut_down()
+                _card = None
+            raise
+        card.register(slot)
+        try:
+            card.ensure_channel(chan)
+        except Exception:
+            if card.unregister(slot):
+                card.shut_down()
+                _card = None
+            raise
+        return _SlotSink(card, slot)
 
 
 def _release(card: _Card, slot: str) -> None:

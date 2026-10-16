@@ -150,6 +150,20 @@ def open_tx(uri: str, lo_hz: float, sample_rate: float, *,
     sample rate."""
     import adi  # pyadi-iio
     sdr = adi.ad9361(uri=uri)
+    # Yapılandırma sırasında (xo_correction, kenetlenen LO/rate, ...) hata
+    # olursa libiio bağlamı açık kalırdı; cihaz meşgul kalıp sonraki Start
+    # de başarısız olurdu. Hata yolunda bağlam kapatılır.
+    try:
+        return _configure_tx(sdr, lo_hz, sample_rate, rf_bandwidth_hz, xo_ppm)
+    except Exception:
+        try:
+            close(sdr)
+        except Exception:
+            pass
+        raise
+
+
+def _configure_tx(sdr, lo_hz, sample_rate, rf_bandwidth_hz, xo_ppm):
     n_tx = _count_tx_channels(sdr)
     sdr._gs_n_tx = n_tx
     sdr._gs_active = list(range(n_tx))
@@ -212,9 +226,13 @@ def _to_dac(block) -> np.ndarray:
     # pyadi-iio truncates float->int16 and wraps on overflow: round and
     # saturate here so the DAC sees the intended code.
     b = np.asarray(block)
-    re = np.clip(np.rint(b.real), -DAC_FULL_SCALE, DAC_FULL_SCALE)
-    im = np.clip(np.rint(b.imag), -DAC_FULL_SCALE, DAC_FULL_SCALE)
-    return (re + 1j * im).astype(np.complex64)
+    out = np.empty(b.shape, dtype=np.complex64)
+    lim = float(DAC_FULL_SCALE)
+    np.rint(b.real, out=out.real, casting="unsafe")
+    np.clip(out.real, -lim, lim, out=out.real)
+    np.rint(b.imag, out=out.imag, casting="unsafe")
+    np.clip(out.imag, -lim, lim, out=out.imag)
+    return out
 
 
 def write(handle, blocks) -> None:

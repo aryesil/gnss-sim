@@ -80,12 +80,15 @@ def solve(pseudoranges: dict, sat_positions: dict, *, weights: dict | None = Non
     Qxx = np.linalg.inv(H.T @ H)
     R = _enu_basis(X[:3])
     Qenu = R @ Qxx[:3, :3] @ R.T
+    tdop = float(math.sqrt(max(0.0, Qxx[3, 3])) * config.C)
+    pdop = float(math.sqrt(max(0.0, Qxx[0, 0] + Qxx[1, 1] + Qxx[2, 2])))
+    gdop = float(math.sqrt(pdop * pdop + tdop * tdop))
     dop = {
-        "gdop": float(math.sqrt(np.trace(Qxx))),
-        "pdop": float(math.sqrt(np.trace(Qxx[:3, :3]))),
-        "hdop": float(math.sqrt(Qenu[0, 0] + Qenu[1, 1])),
-        "vdop": float(math.sqrt(Qenu[2, 2])),
-        "tdop": float(math.sqrt(Qxx[3, 3])),
+        "gdop": gdop,
+        "pdop": pdop,
+        "hdop": float(math.sqrt(max(0.0, Qenu[0, 0] + Qenu[1, 1]))),
+        "vdop": float(math.sqrt(max(0.0, Qenu[2, 2]))),
+        "tdop": tdop,
     }
 
     # a-priori formal covariance straight from the supplied weights

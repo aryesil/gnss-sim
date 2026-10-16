@@ -48,7 +48,10 @@ def load(name: str) -> dict:
     p = _path_for(name)
     if not p.exists():
         raise ScenarioLibError(f"no saved scenario named {name!r}")
-    data = json.loads(p.read_text())
+    try:
+        data = json.loads(p.read_text())
+    except json.JSONDecodeError as ex:
+        raise ScenarioLibError(f"corrupt scenario file for {name!r}: {ex}") from ex
     if "params" not in data or not isinstance(data["params"], dict):
         raise ScenarioLibError(f"corrupt scenario file for {name!r}")
     return data["params"]
@@ -57,4 +60,5 @@ def load(name: str) -> dict:
 def list_names() -> list[str]:
     if not _DIR.is_dir():
         return []
-    return sorted(p.stem for p in _DIR.glob("*.json"))
+    # Arayüz adları innerHTML'e basıyor; _NAME_RE dışı (elle bırakılmış) dosya adları listelenmez.
+    return sorted(p.stem for p in _DIR.glob("*.json") if _NAME_RE.match(p.stem))

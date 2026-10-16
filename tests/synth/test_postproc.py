@@ -119,3 +119,25 @@ def test_multipath_reflection_doppler_rotates_per_sample(tmp_path):
     t = np.arange(n) / _FS
     shape = np.abs(1 + 0.5 * np.exp(2j * np.pi * 100.0 * t))
     assert np.corrcoef(np.abs(y), shape)[0, 1] > 0.99
+
+
+def test_failed_impairment_pass_keeps_the_original_file(tmp_path, monkeypatch):
+    """Yazma sırasında hata olursa yarım geçici dosya özgün IQ'nun yerine
+    geçmemeli."""
+    import numpy as np
+    from backend.models import impairments as imp
+    from backend.synth import postproc
+    path = tmp_path / "band.bin"
+    data = (np.arange(4000, dtype=np.int16) % 100).astype(np.int16)
+    data.tofile(path)
+    before = path.read_bytes()
+
+    def boom(self, x):
+        raise OSError("disk full")
+    monkeypatch.setattr(postproc._Writer, "write", boom)
+    cfg = imp.ImpairmentConfig.from_dict({"enabled_flag": True, "snr_db": 10.0, "seed": 1})
+    import pytest
+    with pytest.raises(OSError):
+        postproc.apply_impairments(path, 2.6e6, 2, cfg)
+    assert path.read_bytes() == before
+    assert not (tmp_path / "band.bin.tmp").exists()

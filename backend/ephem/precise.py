@@ -235,7 +235,7 @@ def parse_sp3(text_or_path: str | pathlib.Path, *, source: str | None = None) ->
                 raise PreciseProductParseError(f"bad P record: {line!r} ({ex})") from ex
             if x_km == 0.0 and y_km == 0.0 and z_km == 0.0:
                 continue  # SP3 "no data" sentinel for this SV at this epoch
-            clk_s = math.nan if abs(clk_us) >= _SP3_BAD_CLOCK_US else clk_us * 1e-6
+            clk_s = math.nan if abs(clk_us) >= 999999.0 else clk_us * 1e-6
             records.setdefault((sysc, prn), []).append(
                 (cur_t, x_km * 1e3, y_km * 1e3, z_km * 1e3, clk_s)
             )

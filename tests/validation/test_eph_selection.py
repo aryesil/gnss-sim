@@ -99,3 +99,14 @@ def test_parse_rinex_records_reads_the_real_fixture():
     # and the selector runs end to end on it
     rep = select(recs, BASE, allow_stale=True)
     assert len(rep.selected) == 10
+
+
+def test_toc_is_placed_in_the_week_nearest_toe():
+    from backend.ephem.eph_select import _toc_near_toe
+    W = 604800.0
+    # toe hafta sonunda, toc bir sonraki haftanın başında (mod _WEEK = 0)
+    assert _toc_near_toe(2300, 0.0, 2300 * W + 604794.0) == 2301 * W
+    # toe haftanın başında, toc önceki haftanın sonunda
+    assert _toc_near_toe(2300, 604800.0 - 6.0, 2300 * W + 6.0) == 2300 * W - 6.0
+    # olağan durum değişmez
+    assert _toc_near_toe(2300, 7200.0, 2300 * W + 7200.0) == 2300 * W + 7200.0

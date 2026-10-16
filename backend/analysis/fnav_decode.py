@@ -78,9 +78,12 @@ def decode_messages(sym01: Sequence[int] | np.ndarray) -> list[dict]:
             if stream[i : i + L.PREAMBLE_SYMS] == _PREAMBLE:
                 coded = deinterleave_8x61(stream[i + L.PREAMBLE_SYMS : i + L.PAGE_SYMS])
                 pre_fec = viterbi_free_decode(coded)
-                message = pre_fec[: L.MSG_BITS]
-                crc = pre_fec[L.MSG_BITS : L.MSG_BITS + L.CRC_BITS]
+                if not check_crc24q(pre_fec, data_bits=L.MSG_BITS, crc_bits=L.CRC_BITS):
+                    pre_fec = _viterbi.viterbi_decode(
+                        coded, invert_g2=True, known_start_state=0, end_state=0
+                    )
                 if check_crc24q(pre_fec, data_bits=L.MSG_BITS, crc_bits=L.CRC_BITS):
+                    message = pre_fec[: L.MSG_BITS]
                     wtype = _u(message, 0, 6)
                     msgs.append({
                         "type": wtype,
@@ -106,7 +109,8 @@ def reconstruct_ephemeris(msgs: list[dict]) -> dict:
         raise ValueError("need CRC-valid F/NAV word types 1, 2 and 3")
     f1, f2, f3 = by_type[1], by_type[2], by_type[3]
     f4 = by_type.get(4, {})
-    rec = {"system": "E"}
+    # F/NAV af0..af2 E1-E5a IF referanslıdır (OS SIS ICD 5.1.4).
+    rec = {"system": "E", "clk_ref": "E5A"}
     rec["sqrtA"] = f2["sqrtA"]
     rec["e"] = f2["e"]
     rec["m0"] = f2["m0"] * _PI

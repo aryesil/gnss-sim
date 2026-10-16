@@ -74,6 +74,17 @@ class _Writer:
         self.f.close()
         os.replace(self.tmp, self.path)
 
+    def abort(self) -> None:
+        """Hata yolunda yarım yazılmış geçici dosyayı at, özgün dosyayı koru:
+        close() çağrılsaydı kesik dosya özgün IQ'nun yerine geçerdi."""
+        try:
+            self.f.close()
+        finally:
+            try:
+                os.remove(self.tmp)
+            except OSError:
+                pass
+
 
 # --- multipath ---------------------------------------------------------------
 
@@ -119,9 +130,12 @@ def apply_multipath(path: pathlib.Path, fs: float, quant: int,
         for a in range(0, n, _CHUNK):
             b = min(n, a + _CHUNK)
             w.write(_mp_chunk(raw, a, b, fs, taps) * np.float32(k))
-    finally:
+    except BaseException:
         del raw
-        w.close()
+        w.abort()
+        raise
+    del raw
+    w.close()
     return {"model": cfg.model, "n_reflections": len(cfg.reflections),
             "level_rescaled_by": k, "doppler": "per-sample"}
 
@@ -266,9 +280,12 @@ def apply_impairments(path: pathlib.Path, fs: float, quant: int,
     w = _Writer(path, quant)
     try:
         pipe.run("out", w.write)
-    finally:
+    except BaseException:
         del raw, pipe
-        w.close()
+        w.abort()
+        raise
+    del raw, pipe
+    w.close()
 
     applied = [name for flag, name in (
         (cfg.sample_rate_ppm, "sample_rate_ppm"), (cfg.cfo_hz, "cfo_hz"),

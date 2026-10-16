@@ -60,7 +60,7 @@ class ChannelModels:
         rx_clock_range_m = receiver_clock.state(
             self.receiver_clock, gps_sow)["range_bias_m"]
         mp_code_bias_m = multipath.tracking_bias(
-            self.multipath, 0.0)["code_bias_m"]
+            self.multipath, gps_sow)["code_bias_m"]
         return {
             "atmo_delay_fn": atmo_fn,
             "rx_clock_range_m": float(rx_clock_range_m),
@@ -96,7 +96,7 @@ class ChannelModels:
             out["receiver_clock_range_bias_m"] = st["range_bias_m"]
             out["receiver_clock_carrier_offset_hz"] = st["carrier_offset_hz"]
         if self.multipath.enabled:
-            tb = multipath.tracking_bias(self.multipath, 0.0)
+            tb = multipath.tracking_bias(self.multipath, gps_sow)
             out["multipath_n_reflections"] = tb["n_reflections"]
             out["multipath_code_bias_m"] = tb["code_bias_m"]
             out["multipath_carrier_bias_m"] = tb["carrier_bias_m"]
